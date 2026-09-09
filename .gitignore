@@ -1,0 +1,25 @@
+node_modules
+dist
+dist-electron
+release
+.DS_Store
+*.log
+.vscode
+.idea
+
+# 环境配置 / 私密信息（绝不提交真实 key）
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# 构建缓存
+*.tsbuildinfo
+build
+
+# 调试产物
+.workbuddy
+
+# Local publish helper (temp, not part of app source)
+QUICK_PUBLISH.ps1
