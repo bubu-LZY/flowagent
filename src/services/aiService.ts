@@ -66,6 +66,31 @@ const MAX_TOOL_CALL_DEPTH = 10
 // 最大连续空回复次数，超过则强制结束（防止 AI 卡住不说话也不调用工具）
 const MAX_CONSECUTIVE_EMPTY_RESPONSES = 2
 
+// 归一化 API 地址：
+// autoSuffix=true（默认）→ 智能补全为 OpenAI 兼容的 baseURL（SDK 会再拼 /chat/completions）：
+//   https://xxx.com                      → https://xxx.com/v1
+//   https://xxx.com/                     → https://xxx.com/v1
+//   https://xxx.com/v1                   → https://xxx.com/v1（不变）
+//   https://xxx.com/v1/chat/completions  → https://xxx.com/v1（去掉多余端点尾巴）
+// autoSuffix=false → 按填写的地址原样请求（适配自带独立后缀的厂商）
+function normalizeBaseUrl(baseUrl: string, autoSuffix: boolean): string {
+  let url = (baseUrl || '').trim()
+  if (!url) return url
+  if (!autoSuffix) return url
+  // 去尾部斜杠
+  while (url.endsWith('/')) url = url.slice(0, -1)
+  // 用户填了完整端点 → 去掉 /chat/completions 尾巴（SDK 会自己拼）
+  if (url.toLowerCase().endsWith('/chat/completions')) {
+    url = url.slice(0, -'/chat/completions'.length)
+    while (url.endsWith('/')) url = url.slice(0, -1)
+  }
+  // 补 /v1（路径里已含 /v1 段则不再加）
+  if (!/\/v1$/i.test(url) && !/\/v1\//i.test(url)) {
+    url = url + '/v1'
+  }
+  return url
+}
+
 // 获取 OpenAI 客户端
 function getOpenAIClient(agentId: string): OpenAI | null {
   const modelConfig = useModelStore.getState().getAgentModel(agentId)
@@ -73,7 +98,7 @@ function getOpenAIClient(agentId: string): OpenAI | null {
 
   return new OpenAI({
     apiKey: modelConfig.apiKey,
-    baseURL: modelConfig.baseUrl,
+    baseURL: normalizeBaseUrl(modelConfig.baseUrl, modelConfig.autoSuffix !== false),
     dangerouslyAllowBrowser: true, // 浏览器端运行（桌面应用内安全）
   })
 }
@@ -295,13 +320,13 @@ export async function callAI(params: CallAIParams): Promise<string> {
     const openaiMessages = buildMessages(systemPrompt, messages, agentId)
 
     // 使用流式 API
+    // temperature 不传：使用 API 服务端默认值，兼容"只允许 temperature=1"的推理类模型
     const stream = await client.chat.completions.create({
       model: modelConfig.model,
       messages: openaiMessages,
       stream: true,
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: tools.length > 0 ? 'auto' : undefined,
-      temperature: 0.7,
     })
 
     let fullContent = ''

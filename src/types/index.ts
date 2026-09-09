@@ -50,6 +50,9 @@ export interface AIModelConfig {
   model: string
   type: 'openai' | 'anthropic' | 'google' | 'ollama' | 'custom'
   isDefault: boolean // 是否为全局默认
+  // API 地址后缀自动补全：true（默认）→ 智能补全 /v1（SDK 再拼 /chat/completions）
+  // false → 按填写的地址原样请求（适配自带独立后缀的厂商）
+  autoSuffix?: boolean
 }
 
 // 智能体配置

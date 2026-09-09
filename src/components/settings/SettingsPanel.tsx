@@ -38,6 +38,7 @@ export const SettingsPanel: React.FC = () => {
     model: 'gpt-4o',
     type: 'openai',
     isDefault: false,
+    autoSuffix: true,
   })
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [showAddSkill, setShowAddSkill] = useState(false)
@@ -72,6 +73,7 @@ export const SettingsPanel: React.FC = () => {
       model: newModel.model!,
       type: newModel.type!,
       isDefault: models.length === 0 || newModel.isDefault || false,
+      autoSuffix: newModel.autoSuffix !== false,
     }
 
     addModel(model)
@@ -86,6 +88,7 @@ export const SettingsPanel: React.FC = () => {
       model: 'gpt-4o',
       type: 'openai',
       isDefault: false,
+      autoSuffix: true,
     })
     toast.success('模型配置已添加')
   }
@@ -225,6 +228,27 @@ export const SettingsPanel: React.FC = () => {
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
+                            {/* API 地址自动补全开关（旧配置 undefined 视为开启） */}
+                            <div
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const next = model.autoSuffix === false // false→true；true/undefined→false
+                                updateModel(model.id, { autoSuffix: next })
+                                toast.success(next ? '已开启地址自动补全' : '已关闭：按填写地址原样请求')
+                              }}
+                              title={
+                                model.autoSuffix !== false
+                                  ? '地址自动补全：已开启（点击关闭，按填写地址原样请求）'
+                                  : '地址自动补全：已关闭（点击开启，自动补全 /v1 等后缀）'
+                              }
+                              className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+                                model.autoSuffix !== false
+                                  ? 'bg-indigo-50 text-indigo-600 border-indigo-200'
+                                  : 'bg-gray-50 text-gray-500 border-gray-200'
+                              }`}
+                            >
+                              {model.autoSuffix !== false ? '补全开' : '补全关'}
+                            </div>
                             {model.isDefault && (
                               <span className="text-xs px-2 py-0.5 bg-primary/10 text-primary rounded">默认</span>
                             )}
@@ -308,6 +332,39 @@ export const SettingsPanel: React.FC = () => {
                       className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/20 font-mono"
                     />
                     <div className="text-xs text-gray-400 mt-1">支持所有 OpenAI 兼容格式的 API · 改了 URL 会自动建议模型名</div>
+                    {/* API 地址后缀自动补全开关 */}
+                    <div
+                      className={`mt-2 flex items-center justify-between gap-2 rounded-lg border px-3 py-2 cursor-pointer transition-colors ${
+                        newModel.autoSuffix !== false
+                          ? 'border-primary/40 bg-indigo-50'
+                          : 'border-gray-200 bg-gray-50'
+                      }`}
+                      onClick={() =>
+                        setNewModel((m) => ({ ...m, autoSuffix: m.autoSuffix === false }))
+                      }
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-medium text-gray-700">
+                          API 地址自动补全{newModel.autoSuffix !== false ? '（已开启）' : '（已关闭）'}
+                        </div>
+                        <div className="text-[11px] text-gray-500 leading-relaxed">
+                          {newModel.autoSuffix !== false
+                            ? '开启：自动补全 /v1/chat/completions 等后缀（填域名或 …/v1 均可）'
+                            : '关闭：按填写的地址原样请求（适配自带独立后缀的厂商）'}
+                        </div>
+                      </div>
+                      <div
+                        className={`w-10 h-5 flex-shrink-0 rounded-full relative transition-colors ${
+                          newModel.autoSuffix !== false ? 'bg-primary' : 'bg-gray-300'
+                        }`}
+                      >
+                        <div
+                          className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${
+                            newModel.autoSuffix !== false ? 'translate-x-5' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </div>
+                    </div>
                   </div>
 
                   <div>
