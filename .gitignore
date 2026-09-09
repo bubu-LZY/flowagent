@@ -23,3 +23,6 @@ build
 
 # Local publish helper (temp, not part of app source)
 QUICK_PUBLISH.ps1
+
+# Local docs guides (workflow / publish guide) - kept local, not published
+docs/
