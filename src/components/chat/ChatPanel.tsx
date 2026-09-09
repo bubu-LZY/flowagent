@@ -180,7 +180,7 @@ export const ChatPanel: React.FC = () => {
     // 仅画图模式：在消息里嵌入 [画图模式] 标记，调度器会跳过评审/多轮讨论
     // 并强制 @executor 一次性画完就结束
     if (drawOnly) {
-      finalContent = `@执行代理 [画图模式] ${finalContent}\n\n（[画图模式] 说明：你只需做一件事：根据上面的描述调用 draw_flowchart 一次性画完。**不要**做需求分析、**不要**@评审员、**不要**做架构评审、**不要**写文档。画完直接报告节点数/连线数 + 自然结束，不要等我回复。）`
+      finalContent = `@执行代理 [画图模式] ${finalContent}\n\n(DRAW-ONLY: call draw_flowchart ONCE with full node+edge lists. No analysis, no @reviewer, no docs. Report real node/edge counts and stop. Reply in Chinese.)`
       toast.info('已开启仅画图模式：消息将直接发给执行代理，跳过评审/讨论')
     }
     const userMessage = {

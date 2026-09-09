@@ -132,29 +132,26 @@ function appendDrawSkillBlock(systemPrompt: string, drawSkillId: string, planMod
   if (skill && skill.enabled) {
     const icon = skill.icon || ""
     const name = skill.name || "Skill"
-    result = result + "\n\n🎨 当前画图规范（强制遵守，来自 " + icon + " " + name + "）：\n" + skill.systemPrompt + "\n"
+    result = result + "\n\n🎨 ACTIVE DRAW SPEC (mandatory, from " + icon + " " + name + "）：\n" + skill.systemPrompt + "\n"
   }
   // 画图铁律（每次画图都生效，违反即重画）
   // 之前只在 planMode 才追加 → 用户实测里执行代理还是反复用 add_node 单点调
   // 现在无条件追加 10 条铁律，钉死 '禁止 add_node、必须 draw_flowchart'
   // 画图铁律：12 条全部钉死在 systemPrompt 末尾；用户反复强调过这些点，
   // 不能依赖 Skill 提示词或 AI '记忆'，必须每次画图都强提示。
-  result = result + '\n\n🚨 画图铁律（每次画图都强制遵守，用户反复强调过）：\n' +
-    '1. 绝对禁止用 add_node / add_edge 逐个添加节点/连线（之前会失败且低效）。\n' +
-    '2. 必须用 draw_flowchart(nodes, edges) 一次把整张图画完，nodes/edges 传完整数组。\n' +
-    '3. 节点 id 用有意义的英文（start / checkAuth / sendEmail），不要纯数字。\n' +
-    '4. 节点形状语义：开始/结束=ellipse；处理=rounded（用户明确要求圆角矩形）；判断=diamond；数据/存储=cylinder。\n' +
-    "5. **节点统一用 rounded（圆角矩形）**，shape 字段传 \"rounded\"，不要用方角 \"rectangle\"。\n" +
-    '6. **连线 style 必须含 edgeStyle=orthogonalEdgeStyle;rounded=1;**（圆角矩形连线 / 圆角直角），绝不用斜线 / 直线 / 折线。\n' +
-    '7. 颜色（draw_flowchart 自动加 fillColor / strokeColor）：主流程用 blue；判断用 yellow；AI/自动用 green；人工用 orange；工单用 purple；结尾用 red。\n' +
-    '8. 连线标签（是/否）落在连线中段无节点处，禁止叠在节点上方。\n' +
-    '9. 节点不重叠；连线不穿过其他节点矩形；连线不垂直交叉；减少连线重合。\n' +
-    '10. 画完必调 get_diagram_xml 校验：节点数、连线数与预期一致。\n' +
-    '11. 绝对不要用 mxGraphModel 这类 XML 字符串，draw_flowchart 系统自动生成。\n' +
-    '12. 画完直接报告节点数/连线数 + 自然结束，不要等我回复。\n'
+    result = result + '\n\n🚨 DRAW RULES (mandatory):\n' +
+    '1. add_node / add_edge do not exist - never call them.\n' +
+    '2. draw_flowchart(nodes, edges) draws the WHOLE chart in one call; pass complete arrays.\n' +
+    '3. Node ids: meaningful english (start/checkAuth). Shapes: start/end=ellipse, process=rounded, decision=diamond, data=cylinder.\n' +
+    '4. Edges: edgeStyle=orthogonalEdgeStyle;rounded=1 (rounded right angles, no diagonals). Labels (是/否) mid-edge, never above nodes.\n' +
+    '5. Colors: main=blue, decision=yellow, ai=green, manual=orange, ticket=purple, end=red.\n' +
+    '6. No node overlap; no edge through a node; avoid perpendicular crossings.\n' +
+    '7. After drawing, call get_diagram_xml and verify node/edge counts.\n' +
+    '8. Never hand-write mxGraphModel XML strings.\n' +
+    '9. Report real node/edge counts, then stop - never wait for the user.\n' +
+    '10. Always reply in Simplified Chinese.\n'
   if (planMode) {
-    result = result + '\n\n🧩 拆解画图模式（已开启）：\n- 画图前先在内部规划：节点清单 + 连线清单 + 各自 x/y 坐标\n- 一次调 draw_flowchart 画完整张图，禁止分步 add_node\n- 画完做 4 步自检：①画布节点数 ②连线数 ③无节点重叠 ④无连线穿过节点\n- 写完直接报告真实数字 + 自然结束，不要等我回复\n'
-  }
+        result = result + '\n\n🧩 PLAN MODE (on): plan node list + edge list + coordinates internally BEFORE any call; one draw_flowchart call for the whole chart; self-check real counts + lint; report numbers and end.\n'  }
   return result
 }
 

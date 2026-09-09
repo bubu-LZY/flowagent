@@ -236,6 +236,19 @@ export const useAgentStore = create<AgentState>()(
         })),
     }),
     {
+      // 内置智能体的提示词/工具列表以代码为准（防止 localStorage 旧配置覆盖新工具）
+      merge: (persistedState: unknown, currentState: AgentState) => {
+        const persisted = (persistedState ?? {}) as Partial<AgentState>
+        const merged: AgentState = { ...currentState, ...persisted }
+        if (Array.isArray(merged.agents)) {
+          merged.agents = merged.agents.map((a) => {
+            const builtin = defaultAgents.find((d) => d.id === a.id)
+            if (!builtin) return a // 用户自定义/未知智能体：保留存档
+            return { ...a, systemPrompt: builtin.systemPrompt, toolIds: builtin.toolIds }
+          })
+        }
+        return merged
+      },
       name: 'flow-agent-agents',
     }
   )

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.2] - 2026-09-10
+
+### 🐛 修复
+
+- **执行代理接手后卡死无动作**：根因是三重工具矛盾（画图铁律要求 `draw_flowchart`，但执行代理工具列表里没有；其提示词又指向 `load_diagram_xml` 手写 XML，而铁律禁止 XML）。执行代理工具列表已补齐 `draw_flowchart / add_nodes / add_edges / update_nodes / remove_cells`，提示词统一指向 `draw_flowchart`。
+- **删除 `add_node` / `add_edge` 单点工具**：从内置工具中彻底移除（并清理其他智能体残留引用），杜绝逐点添加导致的「节点没有真正写入画布」报错。
+- **旧配置自动升级**：内置智能体的 systemPrompt / toolIds 现在以代码为准（persist merge 同步），localStorage 旧配置不再阻塞新功能。
+
+### ⚡ 优化
+
+- **全部提示词英化精简**：7 个智能体 systemPrompt、17 个工具 description、2 个内置 Skill 规范、画图铁律块全部重写为精简英文，显著降低每次请求的 token 消耗。
+- **强制中文回复**：所有提示词统一注入 "Always reply in Simplified Chinese"，AI 输出仍是中文，使用体验不变。
+- **所有工具标注中文名**：设置页（工具管理 / 智能体工具权限）每个工具显示为 `工具id · 中文名`，一眼可懂。
+
 ## [0.1.1] - 2026-09-10
 
 ### 🐛 修复
