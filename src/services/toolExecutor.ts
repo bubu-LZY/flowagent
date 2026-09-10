@@ -533,7 +533,15 @@ async function executeBuiltinTool(
     case 'save_experience':
       return executeSaveExperience(args, agentId)
     default:
-      // 对于未实现的工具，返回模拟结果
+      // MCP 调用绝不能返回假成功：否则外部客户端会误以为操作已完成，实际画布毫无变化
+      if (agentId === 'mcp-system') {
+        return {
+          success: false,
+          error: 'unknown_tool',
+          message: `未实现的工具: ${toolName}`,
+        }
+      }
+      // 对于未实现的内部工具，返回模拟结果
       return {
         success: true,
         message: `工具 ${toolName} 执行成功（模拟）`,

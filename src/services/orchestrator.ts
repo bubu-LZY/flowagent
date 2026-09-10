@@ -178,6 +178,8 @@ class MultiAgentOrchestrator {
   private executorNoToolRetries = 0
   // 设计助手输出不合格重试计数（每轮重置）
   private designerRetryCount = 0
+  // 评审员连续 FAIL 次数（每轮重置，超过上限回 PM 防死循环）
+  private reviewerFailCount = 0
 
   // 【修复 P0-4】会话级状态（之前是模块级全局变量，导致跨会话污染）
   // "任务交付已完成" 会话级锁：一旦 PM 拍板交付，置 true，之后任何新用户输入
@@ -199,6 +201,7 @@ class MultiAgentOrchestrator {
       this.failureCounts.clear()
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
+      this.reviewerFailCount = 0
       // 重置 chatStore 中的会话级状态（轮数、等待用户、停止状态）
       // 这些状态存在全局 store 里，切会话必须重置，否则新会话会继承旧会话的轮数
       useChatStore.getState().resetRound()
@@ -442,6 +445,7 @@ decision1 -> process1 | 否
 
       if (isPass) {
         // 通过 → 回到 PM 拍板交付
+        this.reviewerFailCount = 0
         const pm = activeAgents.find((a) => a.isCoordinator)
         if (pm) {
           return { type: 'dispatch', agentId: pm.id, reason: '评审通过，回到 PM 交付' }
@@ -450,6 +454,15 @@ decision1 -> process1 | 否
       }
 
       if (isFail) {
+        this.reviewerFailCount = (this.reviewerFailCount || 0) + 1
+        // 连续 3 次评审不通过，回 PM 拍板（避免设计/执行/评审无限循环）
+        if (this.reviewerFailCount >= 3) {
+          const pm = activeAgents.find((a) => a.isCoordinator)
+          if (pm) {
+            return { type: 'dispatch', agentId: pm.id, reason: `评审连续 ${this.reviewerFailCount} 次不通过，回 PM 拍板交付或询问用户` }
+          }
+          return { type: 'end', reason: `评审连续 ${this.reviewerFailCount} 次不通过，流程结束` }
+        }
         // 失败 → 看失败原因决定调度谁
         // 如果是布局/坐标问题 → 调度执行代理修改
         // 如果是设计问题 → 调度设计助手
@@ -598,6 +611,7 @@ decision1 -> process1 | 否
       this.failureCounts.clear()
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
+      this.reviewerFailCount = 0
     } else {
       // 轮数只用来限制"讨论"，不该用来卡死"执行"：
       // 用户在等待后回复（通常是追加指令/催进度），如果任务还没完成（画布为空），
@@ -831,12 +845,9 @@ decision1 -> process1 | 否
       return
     }
 
-    // 保护3.4：非项目经理的链式调度限制（chainLevel > 1 不再继续扩散）
-    // 项目经理发起的调度 level=0，被 PM @ 的 level=1，level 1 再 @ 人的 level=2 就停止
-    if (!agent.isCoordinator && chainLevel > 1) {
-      console.log(`[orchestrator] ${agent.name} 处于 chainLevel=${chainLevel}，超过非PM调度深度限制，跳过`)
-      return
-    }
+    // 【已移除】原 chainLevel > 1 防线会静默跳过 chainLevel=2 的执行代理、chainLevel=3 的评审员，
+    // 导致 PM(0) → 设计(1) → 执行(2) 的链式调度在第 3 环就中断，任务"直接终止"。
+    // 现在流程完全由 determineNextAction 状态机驱动，配合 repliedAgentsInRound + MAX_AI_MESSAGES 兜底，无需再按深度拦截。
 
     // 内容过滤：如果连续两条消息是同一个智能体发的（且中间没有其他人发言），跳过，避免自说自话
     // 例外：如果是执行代理且被明确 @了，即使上一条是它发的也要允许回复（因为是新的指令）
@@ -995,36 +1006,52 @@ ${skillInfoText}${toolsInfo}`
       const allToolCalls: any[] = []
 
       // 调用 AI
-let fullContent = ''
-    let success = false
-    try {
-      fullContent = await callAI({
-          systemPrompt,
-          messages: contextMessages,
-          agentId: agent.id,
-          onToken: (token) => ops.appendToMessage(messageId, token),
-          onReasoningToken: (token) => ops.appendThinkingToMessage(messageId, token),
-          onToolCall: (toolCall: any) => {
-            useChatStore.getState().addToolCall(messageId, toolCall)
-            allToolCalls.push(toolCall)
-          },
-          onToolResult: (toolCallId: string, result: any) => {
-            const updates: any = {
-              result,
-              status: result?.success === false ? 'error' : 'completed',
-            }
-            if (result?.success === false && result.message) updates.errorMessage = result.message
-            useChatStore.getState().updateToolCall(messageId, toolCallId, updates)
-            const tc = allToolCalls.find((t: any) => t.id === toolCallId)
-            if (tc) {
-              tc.result = result
-              tc.status = updates.status
-              tc.errorMessage = updates.errorMessage
-            }
-          },
-        })
+      let fullContent = ''
+      let success = false
+      let callError: any = null
+
+      // 单次智能体回复的硬超时兜底：不依赖 SDK 的 AbortSignal
+      // 即使 callAI 内部 fetch/stream 完全卡死（abort 不生效），也能在超时后强制中断
+      const HARD_CALL_TIMEOUT_MS = 5 * 60 * 1000
+
+      try {
+        fullContent = await Promise.race([
+          callAI({
+            systemPrompt,
+            messages: contextMessages,
+            agentId: agent.id,
+            onToken: (token) => ops.appendToMessage(messageId, token),
+            onReasoningToken: (token) => ops.appendThinkingToMessage(messageId, token),
+            onToolCall: (toolCall: any) => {
+              useChatStore.getState().addToolCall(messageId, toolCall)
+              allToolCalls.push(toolCall)
+            },
+            onToolResult: (toolCallId: string, result: any) => {
+              const updates: any = {
+                result,
+                status: result?.success === false ? 'error' : 'completed',
+              }
+              if (result?.success === false && result.message) updates.errorMessage = result.message
+              useChatStore.getState().updateToolCall(messageId, toolCallId, updates)
+              const tc = allToolCalls.find((t: any) => t.id === toolCallId)
+              if (tc) {
+                tc.result = result
+                tc.status = updates.status
+                tc.errorMessage = updates.errorMessage
+              }
+            },
+          }),
+          new Promise<string>((_, reject) => {
+            setTimeout(() => {
+              reject(new Error(`AI 调用硬超时（${HARD_CALL_TIMEOUT_MS / 1000}秒无响应）`))
+            }, HARD_CALL_TIMEOUT_MS)
+          }),
+        ])
       } catch (e) {
+        // 【关键修复】之前这里把异常吞掉转成文本，导致 success 仍被设为 true，
+        // AI 失败/超时被当成"成功"继续调度，任务既没有重试也没有报错，直接"卡死"
         console.error('[orchestrator] callAI 异常:', e)
+        callError = e
         fullContent = `\n\n（AI 调用异常：${(e as any)?.message || '未知错误'}）`
       }
 
@@ -1048,6 +1075,21 @@ let fullContent = ''
         endTime: Date.now(),
         toolCalls: finalToolCalls,
       })
+
+      // 【关键修复】AI 调用异常时，必须走失败重试，不能在吞掉异常后继续调度
+      if (callError) {
+        console.error(`[orchestrator] ${agent.name}（${agent.id}）AI 调用异常，触发失败重试:`, callError.message)
+        addLog(sessionId, 'error', `${agent.name} AI 调用异常`, {
+          agentId: agent.id,
+          agentName: agent.name,
+          agentAvatar: agent.avatar,
+          agentColor: agent.color,
+          content: callError.message || '未知错误',
+        })
+        ops.setStreaming(agent.id, false)
+        await this.handleAgentFailure(agent, callError, ops, activeAgents)
+        return
+      }
 
       this.failureCounts.delete(agent.id)
       success = true
@@ -1254,6 +1296,9 @@ let fullContent = ''
           }
 
           const { messages: latestMessages } = useChatStore.getState()
+          // 被状态机明确调度的下一个智能体，允许其在本轮再次发言
+          //（否则评审不通过后回到设计/执行代理，会因"本轮已回复"被静默跳过，流程再次终止）
+          this.repliedAgentsInRound.delete(nextAgent.id)
           await this.generateAgentResponse(
             nextAgent,
             latestMessages,

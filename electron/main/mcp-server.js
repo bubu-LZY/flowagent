@@ -656,13 +656,13 @@ const MCP_TOOLS = [
   },
   {
     name: 'export_diagram',
-    description: '导出流程图为指定格式（PNG/SVG/PDF/XML）',
+    description: '导出流程图为指定格式（PNG/SVG/JPEG/XML/DrawIO）',
     inputSchema: {
       type: 'object',
       properties: {
         format: {
           type: 'string',
-          enum: ['png', 'svg', 'pdf', 'xml', 'drawio'],
+          enum: ['png', 'svg', 'jpeg', 'xml', 'drawio'],
           description: '导出格式',
         },
         sessionId: { type: 'string', description: '会话ID（可选）' },
@@ -913,7 +913,7 @@ async function handleJsonRpcRequest(body) {
           },
           serverInfo: {
             name: 'flowchart-agent-mcp',
-            version: '0.2.0',
+            version: '0.5.2',
           },
         },
       }
@@ -1063,7 +1063,7 @@ function handleSSE(req, res) {
 
   // 发送初始事件
   res.write(`event: endpoint\ndata: /messages?sessionId=${sessionId}\n\n`)
-  res.write(`event: hello\ndata: ${JSON.stringify({ serverInfo: { name: 'flowchart-agent-mcp', version: '0.2.0' } })}\n\n`)
+  res.write(`event: hello\ndata: ${JSON.stringify({ serverInfo: { name: 'flowchart-agent-mcp', version: '0.5.2' } })}\n\n`)
 
   sseClients.set(sessionId, res)
 
@@ -1196,7 +1196,7 @@ function startServer(port = DEFAULT_PORT) {
       res.end(JSON.stringify({
         status: 'ok',
         service: 'flowchart-agent-mcp',
-        version: '0.2.0',
+        version: '0.5.2',
         uptime: process.uptime(),
       }))
       return

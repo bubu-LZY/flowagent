@@ -145,6 +145,11 @@ async function runCanvasTask(toolName: string, args: any): Promise<any> {
     // 执行工具（用 mcp-system 作为虚拟 agentId，绕过智能体权限校验）
     const result = await executeTool(toolName, toolArgs, 'mcp-system')
 
+    // 把目标会话 ID 附加到返回结果，让 MCP 客户端拿到 sessionId 后能在同一会话继续操作
+    if (result && typeof result === 'object') {
+      result.sessionId = targetSessionId
+    }
+
     // 获取执行后的画布 XML 快照
     let diagramXml: string | undefined
     try {
@@ -341,11 +346,26 @@ async function handleSendChatMessage(args: any) {
 }
 
 async function handleGetChatMessages(args: any) {
-  // TODO: 支持按 sessionId 查询不同会话的消息
-  // 当前 chatStore 是全局的，需要先切换会话再读取
-  const { messages } = useChatStore.getState()
-  
-  let result = messages.map(m => ({
+  const { sessionId, limit } = args || {}
+  const sessionStore = useSessionStore.getState()
+  const chatState = useChatStore.getState()
+
+  // 确定消息来源：
+  // - 未指定 sessionId 或等于当前会话 → 用当前 chatStore 消息（最实时）
+  // - 指定其他会话 → 从 sessionStore.sessions 读该会话的消息快照（不做界面切换，避免影响用户）
+  let messages: any[]
+  let resolvedSessionId: string | null
+  if (sessionId && sessionId !== sessionStore.currentSessionId) {
+    const session = sessionStore.sessions.find((s) => s.id === sessionId)
+    if (!session) throw new Error(`会话不存在: ${sessionId}`)
+    messages = session.messages || []
+    resolvedSessionId = sessionId
+  } else {
+    messages = chatState.messages
+    resolvedSessionId = sessionStore.currentSessionId
+  }
+
+  let result = messages.map((m: any) => ({
     id: m.id,
     role: m.role,
     agentId: m.agentId,
@@ -355,11 +375,10 @@ async function handleGetChatMessages(args: any) {
     isError: m.isError,
     toolCalls: m.toolCalls?.length || 0,
   }))
-  
-  const limit = args?.limit
-  if (limit) result = result.slice(-limit)
-  
-  return { success: true, messages: result, total: messages.length }
+
+  const sliced = limit ? result.slice(-limit) : result
+
+  return { success: true, sessionId: resolvedSessionId, messages: sliced, total: messages.length }
 }
 
 // ===== 智能体管理 =====
@@ -453,7 +472,7 @@ async function handleGetSystemInfo() {
     success: true,
     info: {
       appName: 'Flowchart Agent',
-      version: '0.4.0',
+      version: '0.5.2',
       sessionCount: sessions.length,
       currentSessionId,
       currentSessionMessageCount: messages.length,
