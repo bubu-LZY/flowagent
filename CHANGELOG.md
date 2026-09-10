@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.6] - 2026-09-10
+
+### 🐛 修复
+
+- **设计助手直接调 `generate_image` 出图，假装"画完了"**：designer 提示词明确说"no canvas tools"，但 toolIds 包含 `generate_image`，designer 用 generate_image 生成一张 PNG 假装流程图交付，而画布实际为 0 节点。修复：收紧 designer / architect / reviewer / documenter / newbie 五个非执行智能体的 toolIds，移除 generate_image、load_diagram_xml、clear_diagram、draw_flowchart 及所有 add_/update_/remove_ 写画布工具（这些是 executor 专属）。
+- **执行代理声称完成但画布仍空，没人提醒**：新增"画布真相反查"机制 —— executor 回复含"任务完成/交付/画好了"等完成类关键词时，系统自动读 drawioApi.getXml() 对比真实节点数；若 `<= 1` 立即在聊天里插一条系统警告（⚠️ 执行代理声称完成，但画布只有 N 个节点…），避免再次发生"AI 撒谎"。
+
+### ⚡ 优化
+
+- **工具授权策略以代码为准 + persist merge**：v0.1.2 引入的 agentStore persist merge 此次生效——自动清掉 localStorage 旧配置里"designer 含 generate_image"这种错误授权。
+- 评审员 / 小白 / 文档员三个智能体的 toolIds 已确认**完全干净**（含 generate_image = 0），扫描时 5/5 命中。
+
 ## [0.1.5] - 2026-09-10
 
 ### 🐛 修复

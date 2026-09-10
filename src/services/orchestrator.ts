@@ -1,7 +1,7 @@
 import type { ChatMessage } from '@/types'
-import { useAgentStore, useModelStore, useChatStore, useVersionStore, useExperienceStore, useSkillStore, useUIStore } from '@/store'
+import { useAgentStore, useModelStore, useChatStore, useVersionStore, useExperienceStore, useSkillStore, useUIStore, useToolStore } from '@/store'
 import { useSessionStore } from '@/store/sessionStore'
-import { generateId, extractMentionedAgentIds, extractDispatchTags, delay } from '@/utils/helpers'
+import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay } from '@/utils/helpers'
 import { callAI } from './aiService'
 
 // ============ 系统消息去重（防"任务完成"刷屏） ============
@@ -625,12 +625,19 @@ ${teamDuties.join('\n')}
           ).join('\n')}\n`
         : ''
 
+      // 工具权限预防式注入：让 AI 一开始就知道自己能用哪些工具（按 toolIds 严格筛选）
+      // 防止 designer 拿到 generate_image、executor 误用 load_diagram_xml 等工具权限错位
+      const myTools: Array<{ name: string; zhName?: string; description: string }> = useToolStore.getState().getAgentTools(agent.id)
+      const toolsInfo = myTools.length > 0
+        ? `\n\n⚙️ 你当前可用的工具（不在此列表里的工具你都无权调用，调用会报错）：\n${myTools.map((t) => `- ${t.name}${t.zhName ? '（' + t.zhName + '）' : ''} - ${t.description}`).join('\n')}\n`
+        : `\n\n⚙️ 你当前没有任何工具权限。如果用户需要画图/修改画布，请 @执行代理 来完成。\n`
+
       const baseSystemPrompt = `你是"${agent.name}"。
 
 ${agent.systemPrompt}
 ${coordinatorRoleText}
 ${roundInfoText}
-${skillInfoText}`
+${skillInfoText}${toolsInfo}`
 
 
       const drawSkillId = useUIStore.getState().drawSkill
@@ -696,6 +703,33 @@ let fullContent = ''
 
       this.failureCounts.delete(agent.id)
       success = true
+
+      // 画布校验：执行代理声称"完成/画好"但画布仍为空 → 系统警告（不直接重画，避免淹没）
+      if (agent.id === 'executor') {
+        try {
+          const win = window as any
+          if (win.drawioApi?.getXml) {
+            const xml = await win.drawioApi.getXml()
+            const cells = parseXmlToCells(xml)
+            const count = cells ? cells.size : 0
+            const claimedDone = /(任务完成|交付|请验收|画好了|绘制完成|已经完成|已画好)/.test(fullContent.replace(/<think>[\s\S]*?<\/think>/g, ''))
+            if (claimedDone && count <= 1) {
+              ops.addMessage({
+                id: generateId(),
+                role: 'assistant',
+                agentId: 'system',
+                agentName: '系统',
+                agentAvatar: '⚠️',
+                agentColor: '#f59e0b',
+                content: `⚠️ 执行代理声称完成，但画布只有 ${count} 个节点。请检查：(1) 是否用了 draw_flowchart？(2) 工具返回的 nodeCount 数字是否 > 1？`,
+                timestamp: Date.now(),
+              })
+            }
+          }
+        } catch (e) {
+          // ignore - draw.io 可能没就绪
+        }
+      }
 
       // 标记该智能体本轮已回复
       if (!agent.isCoordinator) {

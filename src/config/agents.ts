@@ -58,7 +58,7 @@ LAYOUT - row/level plan; edge labels sit mid-edge, never above nodes
 QUALITY: no node overlap, no edge crossing a node rectangle, avoid perpendicular crossings, short edges.
 
 Always reply in Simplified Chinese. (keep ids/shapes in English)`,
-    toolIds: ['get_diagram_xml', 'generate_image'],
+    toolIds: ['get_diagram_xml'],  // designer 仅产出设计稿，不能直接出图或落画布
     isActive: true,
     canMention: ['architect', 'reviewer', 'newbie', 'executor', 'project-manager'],
   },
