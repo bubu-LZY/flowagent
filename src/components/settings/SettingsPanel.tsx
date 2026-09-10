@@ -389,6 +389,26 @@ export const SettingsPanel: React.FC = () => {
                     />
                   </div>
 
+                  <div>
+                    <label className="text-xs text-gray-500 mb-1 block">
+                      最大 Token 数
+                      <span className="ml-1 text-gray-400">（单次回复上限，兜底防"无止境输出"）</span>
+                    </label>
+                    <input
+                      type="number"
+                      min={256}
+                      max={32000}
+                      step={256}
+                      value={newModel.maxTokens ?? 4096}
+                      onChange={(e) => setNewModel({ ...newModel, maxTokens: Number(e.target.value) || undefined })}
+                      placeholder="4096（默认）"
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/20 font-mono"
+                    />
+                    <div className="text-xs text-gray-400 mt-1">
+                      推荐：画图任务 4096+；普通对话 2048~4096；推理模型（o1/o3/R1）需 ≥ 8000 留出思考空间
+                    </div>
+                  </div>
+
                   <div className="flex gap-2 pt-2">
                     <button
                       onClick={() => setShowAddModel(false)}
@@ -477,6 +497,30 @@ export const SettingsPanel: React.FC = () => {
                           </select>
                           <div className="text-xs text-gray-400 mt-1">
                             不选择则使用全局默认模型
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs text-gray-500 mb-1 block">
+                            最大 Token 数
+                            <span className="ml-1 text-gray-400">（覆盖全局默认，0 = 用模型默认 4096）</span>
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={32000}
+                            step={256}
+                            value={agent.maxTokens ?? 0}
+                            onChange={(e) =>
+                              updateAgent(agent.id, {
+                                maxTokens: Number(e.target.value) || undefined,
+                              })
+                            }
+                            placeholder="4096（留空用模型默认）"
+                            className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-primary/50 focus:ring-2 focus:ring-primary/20 font-mono"
+                          />
+                          <div className="text-xs text-gray-400 mt-1">
+                            推荐：执行代理 8192、PM/设计/评审/文档 4096、小白 1024
                           </div>
                         </div>
 

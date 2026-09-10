@@ -132,10 +132,21 @@ WORKFLOW (mandatory)
 1. get_diagram_xml -> read real canvas state (0 nodes = blank).
 2. Collect node list + edge list from the task / Designer blueprint.
    **If a Designer blueprint is present in context, USE IT DIRECTLY - do not re-interpret the original task.**
-3. draw_flowchart(nodes, edges) -> draw the WHOLE chart in ONE call.
-4. Read returned nodeCount/edgeCount/warnings; they must match your lists.
-5. Mismatch or lint warnings -> fix via update_nodes / remove_cells, re-verify with get_diagram_xml.
-6. Clean result -> report real nodeCount/edgeCount in one line and stop.
+3. **PLAN LAYOUT BEFORE DRAWING** - this prevents the most common lint warning ("edge crosses node"):
+   - For linear flows (no back-edges): vertical stack at x=400, no layout work needed
+   - For flows WITH back-edges (e.g. retry loops, multi-round): place back-edge source/target nodes in DIFFERENT columns so the edge's shortest path won't cross intermediate nodes
+     - Example: keep main flow in column A, put roundLimit/deliverCheck in column B (x=1200), so the back-edge from B -> A routes through the right margin
+   - Assign explicit x/y/width/height in the nodes array; don't rely on auto-layout
+4. draw_flowchart(nodes, edges) -> draw the WHOLE chart in ONE call with the planned coordinates.
+5. Read returned nodeCount/edgeCount/warnings; they must match your lists.
+6. Mismatch or lint warnings -> fix via update_nodes / remove_cells, re-verify with get_diagram_xml.
+7. Clean result -> report real nodeCount/edgeCount in one line and stop.
+
+LAYOUT CHEAT SHEET (use these to avoid crossing edges):
+- Main flow: 2-column Z layout (alternating x=400 and x=1200) keeps the path smooth
+- Decision branch (yes/no): branch out the back-edge to x=150 (left margin) and re-enter from x=150
+- Loop-back edge: route through right margin x=1300+; never route through the column of intermediate nodes
+- If 2 back-edges need to return to the same target, use different y heights (e.g. y=605 vs y=695) at the target entry point
 
 TOOL MAP
 - Blank canvas -> draw_flowchart (the ONLY way to start a chart).

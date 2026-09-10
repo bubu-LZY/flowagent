@@ -321,10 +321,19 @@ export async function callAI(params: CallAIParams): Promise<string> {
 
     // 使用流式 API
     // temperature 不传：使用 API 服务端默认值，兼容"只允许 temperature=1"的推理类模型
+    // maxTokens 兜底防"无止境输出"：优先级 智能体配置 > 模型配置 > 默认 4096
+    const agentMaxTokens = useAgentStore.getState().agents.find(a => a.id === agentId)?.maxTokens
+    const modelMaxTokens = modelConfig.maxTokens
+    const maxTokens = (agentMaxTokens && agentMaxTokens > 0)
+      ? agentMaxTokens
+      : (modelMaxTokens && modelMaxTokens > 0)
+        ? modelMaxTokens
+        : 4096
     const stream = await client.chat.completions.create({
       model: modelConfig.model,
       messages: openaiMessages,
       stream: true,
+      max_tokens: maxTokens,
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: tools.length > 0 ? 'auto' : undefined,
     })

@@ -34,9 +34,8 @@ export const ChatPanel: React.FC = () => {
   const [isAtBottom, setIsAtBottom] = useState(true)
   // 是否有新消息到达但用户没在底部（用于显示"跳到最新"按钮）
   const [hasNewBelow, setHasNewBelow] = useState(false)
-  // 用户主动滚动的"意图锁"：用户向上滚一下后置 true，期间流式不再拉回底部
-  // 用户点"跳到最新"按钮回到底部后置 false，之后流式恢复跟滚
-  const userScrolledUpRef = useRef(false)
+  // 底部锁由 userWantsBottomLockRef 统一管理（避免重复 ref）
+  // 用户主动向上滚（离开底部）→ false；流式 token 追加的 scrollTop 变化不触发 scroll 事件，不会被这里误判
   // 记录上一轮的轮数，用于检测轮次变化
   const prevRoundRef = useRef(discussionRound)
 
@@ -76,9 +75,9 @@ export const ChatPanel: React.FC = () => {
     }
   }, [])
 
-  // 监听滚动事件，更新 isAtBottom 状态 + 用户主动滚动的意图锁
-  // 关键：用户手动向上滚（离开底部 > 阈值）就锁定 userScrolledUpRef=true，期间流式绝不拉回底部
-  // 用户手动回到底部时解锁，浮按钮点"跳到最新"时也解锁
+  // 监听滚动事件：用户**主动**离开底部 → 关闭底部锁（停止被流式推着走）
+  // 关键：区分"用户滚动"和"内容自动变长"——只有 scroll 事件才会触发 handleScroll
+  // 内容自动变长（流式 token 追加）不会产生 scroll 事件，所以不会被这里捕获
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -88,13 +87,9 @@ export const ChatPanel: React.FC = () => {
       setIsAtBottom(atBottom)
       if (atBottom) {
         setHasNewBelow(false)
-        userScrolledUpRef.current = false  // 回到底部 → 解锁
+        userWantsBottomLockRef.current = true   // 回到（或一直在）底部 → 重新开锁
       } else {
-        // 只有当滚动方向是"离开底部"才锁定（向上滚）
-        // 容器增长（流式推长）本身也会让 isAtBottom 短暂变 false，但这是"内容变化"不是"用户滚动"
-        // 用户真实滚动 = scroll event；内容变化 = MutationObserver childList
-        // 这里只通过 scroll 事件触发，所以"内容自动变长"不会被误锁
-        userScrolledUpRef.current = true   // 主动离开底部 → 锁定
+        userWantsBottomLockRef.current = false  // 主动离开底部 → 关锁
       }
     }
 
@@ -155,18 +150,24 @@ export const ChatPanel: React.FC = () => {
     }
   }, [messages, addMessage])
 
-  // 流式输出时：只有在用户**本来就在底部**时才跟滚到底部。
-// 如果用户手动向上滚去查看旧消息 / 展开长消息的某段，**绝不**强制拉回底部。
-// 此时"跳到最新"浮按钮显示，用户点按钮才跳转。
-// 用 streamingAgents.length 作 trigger（每多一个 agent 流式变化就触发一次）
-useEffect(() => {
-  if (streamingAgents.length > 0 && isAtBottom) {
-    requestAnimationFrame(() => {
-      scrollToBottom(false) // 流式时用 auto，避免平滑滚动的延迟感
-    })
-  }
-  // 显式不依赖 scrollToBottom 内的 messages — 否则仍会触发
-}, [streamingAgents.length, isAtBottom])
+  // 流式输出时持续锁底部：只要"用户曾处于底部"且"当前 agent 还在流式"，就用 rAF 每帧把视口锚到底部
+  // 这是 v0.1.8/9/11 改不动的地方——容器被流式推长时 scrollTop 自动变，isAtBottom 瞬间变 false，但用户其实没动鼠标
+  // 解法：拉一次滚动时记"用户当时在底部"，之后只要这个 flag 是 true 就无视 scrollTop 变化强制锁底
+  // 用户**主动**向上滚（scroll 事件 + 不在底部）就把 flag 置 false
+  const userWantsBottomLockRef = useRef(true)
+  useEffect(() => {
+    if (streamingAgents.length === 0) return
+    if (!userWantsBottomLockRef.current) return
+    let rafId = 0
+    const tick = () => {
+      if (userWantsBottomLockRef.current && containerRef.current) {
+        containerRef.current.scrollTop = containerRef.current.scrollHeight
+        rafId = requestAnimationFrame(tick)
+      }
+    }
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
+  }, [streamingAgents.length])
 
   // 轮次变化时自动生成会话总结
   useEffect(() => {
@@ -260,7 +261,8 @@ useEffect(() => {
 
   const activeAgents = getActiveAgents()
   const currentSession = getCurrentSession()
-  const streamingAgentList = streamingAgents
+  // 用 Set 去重（兜底防御：即使 store 因为历史原因有重复 id，UI 也不重复渲染）
+  const streamingAgentList = Array.from(new Set(streamingAgents))
     .map(id => activeAgents.find(a => a.id === id))
     .filter(Boolean)
 
@@ -419,8 +421,8 @@ useEffect(() => {
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
               <button
                 onClick={() => {
-                  // 1. 立即解锁意图锁 → 之后流式恢复正常跟滚
-                  userScrolledUpRef.current = false
+                  // 1. 立即重开锁 → 之后流式持续锁底部
+                  userWantsBottomLockRef.current = true
                   // 2. 滚到底部
                   requestAnimationFrame(() => {
                     scrollToBottom(true)

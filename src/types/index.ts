@@ -54,6 +54,9 @@ export interface AIModelConfig {
   // API 地址后缀自动补全：true（默认）→ 智能补全 /v1（SDK 再拼 /chat/completions）
   // false → 按填写的地址原样请求（适配自带独立后缀的厂商）
   autoSuffix?: boolean
+  // 单次回复的最大 token 数（兜底，避免 AI 一直输出"无止境"）
+  // 不填 → 默认 4096。0 / undefined = 用 API 服务端默认（不限制，不推荐）
+  maxTokens?: number
 }
 
 // 智能体配置
@@ -71,6 +74,9 @@ export interface AgentConfig {
   isCoordinator?: boolean // 是否为总协调者（项目经理）
   // API 配置：为空则使用全局默认
   modelConfigId?: string // 单独的模型配置 ID
+  // 该智能体的回复最大 token 数（覆盖模型默认，0/undefined = 用模型默认 4096）
+  // 推荐：执行代理（画图）8192，设计/评审/文档 4096，PM 2048（短），小白 1024
+  maxTokens?: number
 }
 
 // 聊天消息

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.13] - 2026-09-10
+
+### 🐛 修复
+
+- **AI 回复无止境输出（AI 写多少 token 给多少，gpt-4o 默认 16k）**：`aiService.ts` 在 `chat.completions.create` 里**没传 `max_tokens`**。修复：传入 `max_tokens`，**优先级 智能体配置 > 模型配置 > 4096 fallback**（防画图 agent 仍可设到 8192+，PM/设计/评审/文档默认 4096）。
+  - `AIModelConfig` 和 `AgentConfig` 都加 `maxTokens?: number` 字段
+  - `SettingsPanel`：① 添加模型表单加"最大 Token 数"输入框（默认 4096）② 智能体 tab 每个智能体的"使用模型"下加"最大 Token 数"输入框（覆盖模型默认）
+  - UI 提示文字写明推荐值：执行代理 8192 / PM-设计-评审-文档 4096 / 小白 1024 / 推理模型 8000+
+
+### ⚡ 优化
+
+- 顶部"当前作业人"显示重复/不准：`setStreaming` 推入时**没去重**，同一 agent 多次 `setStreaming(true)` 重复入数组 → 修复（exists check）。`ChatPanel` 渲染侧也用 `Set` 兜底防御。
+- 流式输出仍被持续顶：v0.1.8/9/11 改"依赖 messages.length"不够，**容器被流式推长时 scrollTop 变化让 isAtBottom 瞬间变 false**。修复：新增 `userWantsBottomLockRef` + **rAF 每帧锁底**机制（用户主动向上滚才关锁，token 推长不触发 scroll 事件不会误关）。删掉老 `userScrolledUpRef` 重复 ref。
+- `vite.config.ts` 加 `configFile` 字段防止 vite 在 cwd 旁生成 `vite.config.ts.timestamp-*.mjs` 临时文件（之前那个文件含你机器绝对路径 + 用户名，被错误 commit）。
+- 执行代理提示词加 **LAYOUT CHEAT SHEET**（应对画流程图时回边穿越节点 lint 警告）：2 列 Z 布局 / 决策分支走左/右 margin / loop-back 走右侧 x=1300+；WORKFLOW 第 3 步改成"PLAN LAYOUT BEFORE DRAWING"。
+
 ## [0.1.12] - 2026-09-10
 
 ### 🐛 修复（合 v0.1.11 网络重发）

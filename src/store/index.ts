@@ -76,11 +76,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     })),
 
   setStreaming: (agentId, isStreaming) =>
-    set((state) => ({
-      streamingAgents: isStreaming
-        ? [...state.streamingAgents, agentId]
-        : state.streamingAgents.filter((id) => id !== agentId),
-    })),
+    set((state) => {
+      const exists = state.streamingAgents.includes(agentId)
+      if (isStreaming && exists) return state // 防重：同一 agent 多次 setStreaming(true) 不重复入数组
+      if (!isStreaming && !exists) return state // 防重：从未入数组的 agent 不要 setStreaming(false)
+      return {
+        streamingAgents: isStreaming
+          ? [...state.streamingAgents, agentId]
+          : state.streamingAgents.filter((id) => id !== agentId),
+      }
+    }),
 
   clearMessages: () => set({ messages: [] }),
   setMessages: (messages) => set({ messages }),
