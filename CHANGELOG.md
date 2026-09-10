@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.12] - 2026-09-10
+
+### 🐛 修复（合 v0.1.11 网络重发）
+
+**v0.1.11 推送因 502 失败未生效，本版并入 v0.1.11 全部修复**：
+
+- **用户主动滚动的意图锁 + 浮按钮永久可见**：新增 `userScrolledUpRef` —— 用户**主动**向上滚（scroll 事件）→ 锁定 = true → 流式不强制拉回底部；用户回到底部 / 点「跳到最新」→ 解锁 = false。区分"用户主动滚动"vs"内容自动变长"靠的是 scroll 事件本身（用户操作才会触发，DOM 自动变长不会）。
+- **流式 useEffect 依赖只 `[streamingAgents.length, isAtBottom]`**，去掉 `scrollToBottom`（不依赖函数引用，避免闭包陷阱）；并在显式注释里说明"绝不强制拉回底部"。
+- **「↓ 跳到最新」按钮**：v0.1.8 那个 `!isAtBottom && hasNewBelow` 双重条件导致"用户只是看旧消息就看不到按钮"，现在只看 `!isAtBottom` 即可显示（hasNewBelow 仅控制红点"新"徽标）。
+- **点击按钮**：先 `userScrolledUpRef.current = false` 解锁，再 `scrollToBottom(true)` 滚到底部。
+
 ## [0.1.11] - 2026-09-10
 
 ### 🐛 修复（v0.1.8+v0.1.9+v0.1.11 第四轮）

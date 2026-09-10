@@ -582,6 +582,9 @@ export const SettingsPanel: React.FC = () => {
           {/* Skills */}
           {settingsTab === 'skills' && (
             <div className="space-y-4">
+              {/* 画图规范 Skill 快捷选择器（用户最常用的设置） */}
+              <DrawSkillSelector />
+
               <div className="flex items-center justify-between">
                 <div className="text-sm text-gray-500">
                   Skills 是可插拔的能力模块，可以增强智能体的特定领域能力
@@ -805,6 +808,8 @@ const ExperienceSettings: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <DrawSkillSelector />
+
       {/* 存储路径设置（仅 Electron 环境显示） */}
       {isElectronEnv && (
         <div>
@@ -951,8 +956,9 @@ const ExperienceSettings: React.FC = () => {
   )
 }
 
-// 通用设置子组件
-const GeneralSettings: React.FC = () => {
+
+// 画图规范 Skill 选择器（共享组件，Settings 通用 tab + Skills tab 顶部都嵌一个）
+const DrawSkillSelector: React.FC = () => {
   const drawSkill = useUIStore((s) => s.drawSkill)
   const setDrawSkill = useUIStore((s) => s.setDrawSkill)
   const skills = useSkillStore((s) => s.skills)
@@ -972,6 +978,56 @@ const GeneralSettings: React.FC = () => {
     },
   ]
 
+  return (
+    <div>
+      <div className="text-sm font-medium text-gray-700 mb-3">🎨 画图规范 Skill</div>
+      <div className="p-4 bg-gray-50 rounded-lg space-y-3">
+        <div className="text-xs text-gray-500">
+          选择执行代理画图时遵循的规范。无论你是"仅画图模式"还是群聊里 @执行代理，画图都按这个 Skill 的规范来。
+        </div>
+        <div className="space-y-2">
+          {drawSkillOptions.map((opt) => {
+            const enabled = skills.find((s) => s.id === opt.id)?.enabled
+            return (
+              <label
+                key={opt.id}
+                className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                  drawSkill === opt.id
+                    ? 'border-primary bg-indigo-50'
+                    : 'border-gray-200 bg-white hover:border-gray-300'
+                } ${enabled === false ? 'opacity-50' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="drawSkill"
+                  checked={drawSkill === opt.id}
+                  onChange={() => setDrawSkill(opt.id as any)}
+                  className="mt-1 w-4 h-4 accent-primary"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-gray-800 flex items-center gap-2">
+                    <span>{opt.icon}</span>
+                    <span>{opt.title}</span>
+                    {drawSkill === opt.id && (
+                      <span className="text-xs px-1.5 py-0.5 bg-primary text-white rounded">当前</span>
+                    )}
+                    {enabled === false && (
+                      <span className="text-xs px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded">未启用</span>
+                    )}
+                  </div>
+                  <div className="text-xs text-gray-600 mt-1 leading-relaxed">{opt.desc}</div>
+                </div>
+              </label>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 通用设置子组件
+export const GeneralSettings: React.FC = () => {
   const [storagePath, setStoragePath] = useState<string>('')
   const [isElectronEnv, setIsElectronEnv] = useState(false)
 
@@ -1031,52 +1087,6 @@ const GeneralSettings: React.FC = () => {
       }
     }
   }
-
-      {/* 画图 Skill 选择器（影响所有画图调用：仅画图模式 + 群聊中画图） */}
-      <div>
-        <div className="text-sm font-medium text-gray-700 mb-3">🎨 画图规范 Skill</div>
-        <div className="p-4 bg-gray-50 rounded-lg space-y-3">
-          <div className="text-xs text-gray-500">
-            选择执行代理画图时遵循的规范。无论你是"仅画图模式"还是群聊里 @执行代理，画图都按这个 Skill 的规范来。
-          </div>
-          <div className="space-y-2">
-            {drawSkillOptions.map((opt) => {
-              const enabled = skills.find((s) => s.id === opt.id)?.enabled
-              return (
-                <label
-                  key={opt.id}
-                  className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                    drawSkill === opt.id
-                      ? 'border-primary bg-indigo-50'
-                      : 'border-gray-200 bg-white hover:border-gray-300'
-                  } ${enabled === false ? 'opacity-50' : ''}`}
-                >
-                  <input
-                    type="radio"
-                    name="drawSkill"
-                    checked={drawSkill === opt.id}
-                    onChange={() => setDrawSkill(opt.id as any)}
-                    className="mt-1 w-4 h-4 accent-primary"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-800 flex items-center gap-2">
-                      <span>{opt.icon}</span>
-                      <span>{opt.title}</span>
-                      {drawSkill === opt.id && (
-                        <span className="text-xs px-1.5 py-0.5 bg-primary text-white rounded">当前</span>
-                      )}
-                      {enabled === false && (
-                        <span className="text-xs px-1.5 py-0.5 bg-gray-200 text-gray-600 rounded">未启用</span>
-                      )}
-                    </div>
-                    <div className="text-xs text-gray-600 mt-1 leading-relaxed">{opt.desc}</div>
-                  </div>
-                </label>
-              )
-            })}
-          </div>
-        </div>
-      </div>
 
   return (
     <div className="space-y-6">
