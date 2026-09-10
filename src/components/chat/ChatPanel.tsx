@@ -7,7 +7,7 @@ import { SummaryPanel } from './SummaryPanel'
 import { useChatStore, useAgentStore, useUIStore } from '@/store'
 import { useSessionStore } from '@/store/sessionStore'
 import { useSummaryStore } from '@/store/summaryStore'
-import { generateId, parseMentions, isElectron, copyToClipboard } from '@/utils/helpers'
+import { generateId, parseMentions, isElectron, copyToClipboard, extractMentionedAgentIds } from '@/utils/helpers'
 import { exportChatToMarkdown } from '@/utils/exportChat'
 import { toast } from 'sonner'
 import { multiAgentOrchestrator } from '@/services/orchestrator'
@@ -177,6 +177,8 @@ export const ChatPanel: React.FC = () => {
 
     // 添加用户消息
     let finalContent = inputValue.trim()
+    // 用户手动 @ 的智能体（在注入 [画图模式] 前缀之前，用原始输入解析）
+    const manualMentionIds = extractMentionedAgentIds(inputValue, useAgentStore.getState().agents)
     // 仅画图模式：在消息里嵌入 [画图模式] 标记，调度器会跳过评审/多轮讨论
     // 并强制 @executor 一次性画完就结束
     if (drawOnly) {
@@ -188,7 +190,7 @@ export const ChatPanel: React.FC = () => {
       role: 'user' as const,
       content: finalContent,
       timestamp: Date.now(),
-      mentions: parseMentions(finalContent),
+      mentions: manualMentionIds.length > 0 ? manualMentionIds : parseMentions(finalContent),
     }
     addMessage(userMessage)
     setInputValue('')

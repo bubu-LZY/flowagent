@@ -322,6 +322,25 @@ class MultiAgentOrchestrator {
     // 用户消息包含 [画图模式] 标记 → 跳过 PM 派活、跳过评审/讨论，直接派 executor 画图
     // 这就是用户在输入框按"仅画图"开关后触发的快捷路径
     if (userMessage.content.includes('[画图模式]')) {
+      // 用户手动 @ 了指定的人（排除系统注入的 executor/user）→ 优先让被 @ 的人回复，
+      // 画图模式的精简指令仍在消息里生效；仅当没有手动 @ 时才走 executor 快捷路径
+      const manualIds = ((userMessage.mentions as string[]) || []).filter(
+        (id: string) => id !== 'executor' && id !== 'user'
+      )
+      const targetAgent = manualIds
+        .map((id: string) => activeAgents.find((a) => a.id === id))
+        .find(Boolean)
+      if (targetAgent) {
+        console.log('[orchestrator] 画图模式 + 手动 @' + targetAgent.name + '，让被 @ 的智能体回复')
+        ops.setStreaming(targetAgent.id, true)
+        try {
+          const { messages: latestMsgs } = useChatStore.getState()
+          await this.generateAgentResponse(targetAgent, latestMsgs, ops, !!targetAgent.isCoordinator, true, 1)
+        } finally {
+          ops.setStreaming(targetAgent.id, false)
+        }
+        return
+      }
       const executor = activeAgents.find((a) => a.id === 'executor')
       if (executor) {
         console.log('[orchestrator] 检测到 [画图模式] 标记，跳过 PM 直接派 executor')

@@ -247,7 +247,10 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
             <span
               key={`skill-${match.index}`}
               className="skill-mention"
-              style={{ backgroundColor: 'rgba(245, 158, 11, 0.15)', color: '#b45309' }}
+              style={isUser
+                ? { backgroundColor: 'rgba(255,255,255,0.95)', color: '#1f2937', border: '1.5px solid rgba(245,158,11,0.7)' }
+                : { backgroundColor: 'rgba(245, 158, 11, 0.15)', color: '#b45309' }
+              }
               title={`Skill：${matched.description}`}
             >
               #{matched.icon || '✨'} {matched.name}
@@ -273,10 +276,13 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
             <span
               key={`mention-${match.index}`}
               className="mention"
-              style={{
-                backgroundColor: mentionedAgent.color + '20',
-                color: mentionedAgent.color,
-              }}
+              style={isUser
+                ? { backgroundColor: 'rgba(255,255,255,0.95)', color: '#1f2937', border: '1.5px solid ' + mentionedAgent.color }
+                : {
+                    backgroundColor: mentionedAgent.color + '20',
+                    color: mentionedAgent.color,
+                  }
+              }
             >
               @{mentionedAgent.name}
             </span>
