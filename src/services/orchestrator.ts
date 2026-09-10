@@ -629,8 +629,8 @@ ${teamDuties.join('\n')}
       // 防止 designer 拿到 generate_image、executor 误用 load_diagram_xml 等工具权限错位
       const myTools: Array<{ name: string; zhName?: string; description: string }> = useToolStore.getState().getAgentTools(agent.id)
       const toolsInfo = myTools.length > 0
-        ? `\n\n⚙️ 你当前可用的工具（不在此列表里的工具你都无权调用，调用会报错）：\n${myTools.map((t) => `- ${t.name}${t.zhName ? '（' + t.zhName + '）' : ''} - ${t.description}`).join('\n')}\n`
-        : `\n\n⚙️ 你当前没有任何工具权限。如果用户需要画图/修改画布，请 @执行代理 来完成。\n`
+        ? `\n\n⚙️ [内部] 你当前可用的工具（仅供你判断能做什么；不要在给用户的回复里复述这条列表）:\n${myTools.map((t) => `- ${t.name}${t.zhName ? '（' + t.zhName + '）' : ''} - ${t.description}`).join('\n')}\n`
+        : `\n\n⚙️ [内部] 你当前没有任何工具权限。如果用户需要画图/修改画布，请 @执行代理 来完成。\n`
 
       const baseSystemPrompt = `你是"${agent.name}"。
 
