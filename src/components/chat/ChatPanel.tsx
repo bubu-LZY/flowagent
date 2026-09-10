@@ -34,6 +34,9 @@ export const ChatPanel: React.FC = () => {
   const [isAtBottom, setIsAtBottom] = useState(true)
   // 是否有新消息到达但用户没在底部（用于显示"跳到最新"按钮）
   const [hasNewBelow, setHasNewBelow] = useState(false)
+  // 用户主动滚动的"意图锁"：用户向上滚一下后置 true，期间流式不再拉回底部
+  // 用户点"跳到最新"按钮回到底部后置 false，之后流式恢复跟滚
+  const userScrolledUpRef = useRef(false)
   // 记录上一轮的轮数，用于检测轮次变化
   const prevRoundRef = useRef(discussionRound)
 
@@ -73,7 +76,9 @@ export const ChatPanel: React.FC = () => {
     }
   }, [])
 
-  // 监听滚动事件，更新 isAtBottom 状态
+  // 监听滚动事件，更新 isAtBottom 状态 + 用户主动滚动的意图锁
+  // 关键：用户手动向上滚（离开底部 > 阈值）就锁定 userScrolledUpRef=true，期间流式绝不拉回底部
+  // 用户手动回到底部时解锁，浮按钮点"跳到最新"时也解锁
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -81,10 +86,19 @@ export const ChatPanel: React.FC = () => {
     const handleScroll = () => {
       const atBottom = checkIsAtBottom()
       setIsAtBottom(atBottom)
-      if (atBottom) setHasNewBelow(false)
+      if (atBottom) {
+        setHasNewBelow(false)
+        userScrolledUpRef.current = false  // 回到底部 → 解锁
+      } else {
+        // 只有当滚动方向是"离开底部"才锁定（向上滚）
+        // 容器增长（流式推长）本身也会让 isAtBottom 短暂变 false，但这是"内容变化"不是"用户滚动"
+        // 用户真实滚动 = scroll event；内容变化 = MutationObserver childList
+        // 这里只通过 scroll 事件触发，所以"内容自动变长"不会被误锁
+        userScrolledUpRef.current = true   // 主动离开底部 → 锁定
+      }
     }
 
-    container.addEventListener('scroll', handleScroll)
+    container.addEventListener('scroll', handleScroll, { passive: true })
     return () => container.removeEventListener('scroll', handleScroll)
   }, [checkIsAtBottom])
 
@@ -141,15 +155,18 @@ export const ChatPanel: React.FC = () => {
     }
   }, [messages, addMessage])
 
-  // 流式输出时保持在底部
-  useEffect(() => {
-    // 如果有正在流式输出的智能体，且用户在底部，则保持滚动
-    if (streamingAgents.length > 0 && isAtBottom) {
-      requestAnimationFrame(() => {
-        scrollToBottom(false) // 流式时用 auto，避免平滑滚动的延迟感
-      })
-    }
-  }, [streamingAgents, isAtBottom, scrollToBottom])
+  // 流式输出时：只有在用户**本来就在底部**时才跟滚到底部。
+// 如果用户手动向上滚去查看旧消息 / 展开长消息的某段，**绝不**强制拉回底部。
+// 此时"跳到最新"浮按钮显示，用户点按钮才跳转。
+// 用 streamingAgents.length 作 trigger（每多一个 agent 流式变化就触发一次）
+useEffect(() => {
+  if (streamingAgents.length > 0 && isAtBottom) {
+    requestAnimationFrame(() => {
+      scrollToBottom(false) // 流式时用 auto，避免平滑滚动的延迟感
+    })
+  }
+  // 显式不依赖 scrollToBottom 内的 messages — 否则仍会触发
+}, [streamingAgents.length, isAtBottom])
 
   // 轮次变化时自动生成会话总结
   useEffect(() => {
@@ -395,11 +412,16 @@ export const ChatPanel: React.FC = () => {
           )}
           <div ref={messagesEndRef} />
 
-          {/* 跳到最新按钮：用户手动向上滚动（isAtBottom=false）且有新消息时显示 */}
+          {/* 跳到最新按钮：用户手动向上滚动（isAtBottom=false）就显示（无论有没有新消息）
+              - 之前 v0.1.8 是 `!isAtBottom && hasNewBelow` 双重条件，导致用户只是看旧消息就看不到按钮
+              - 现在只判 `!isAtBottom` 即可，hasNewBelow 仅用于红点"新"徽标 */}
           {!isAtBottom && (
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
               <button
                 onClick={() => {
+                  // 1. 立即解锁意图锁 → 之后流式恢复正常跟滚
+                  userScrolledUpRef.current = false
+                  // 2. 滚到底部
                   requestAnimationFrame(() => {
                     scrollToBottom(true)
                     setHasNewBelow(false)

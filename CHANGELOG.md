@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.11] - 2026-09-10
+
+### 🐛 修复（v0.1.8+v0.1.9+v0.1.11 第四轮）
+
+- **流式输出时仍被持续顶下去看不到内容**：v0.1.8 / v0.1.9 只改对了"新消息条目"边界，但**真正祸根**是流式 useEffect 用 `[streamingAgents, isAtBottom, scrollToBottom]` 作依赖 → ① `scrollToBottom` 内部闭包捕获 messages，流式 token 追加会让它换引用 → 依赖更新 → effect 重跑 → ② 即便有 `isAtBottom` 守护，**流式追加本身会推长容器 → `isAtBottom` 瞬间变 false** → 视口位置"看起来"在中间。
+- 这次**彻底**改：流式 useEffect 依赖**只** `[streamingAgents.length, isAtBottom]`，去掉 `scrollToBottom`（不依赖函数引用，避免闭包陷阱）；并在显式注释里说明"绝不强制拉回底部"。`isAtBottom` 此时**只在用户**手动滚到底时为 true（不会因容器被推长而误判）。"跳到最新"浮按钮在 v0.1.8 那一波就绪了，自然接管"用户不滚动但想看新内容"的场景。
+
+- **用户主动滚动的意图锁 + 浮按钮永久可见**：新增 `userScrolledUpRef` —— 用户**主动**向上滚（scroll 事件）→ 锁定 = true → 流式不强制拉回底部；用户回到底部 / 点「跳到最新」→ 解锁 = false。区分"用户主动滚动"vs"内容自动变长"靠的是 scroll 事件本身（用户操作才会触发，DOM 自动变长不会）。
+- 「↓ 跳到最新」按钮：v0.1.8 那个 `!isAtBottom && hasNewBelow` 双重条件导致"用户只是看旧消息就看不到按钮"，现在只看 `!isAtBottom` 即可显示（hasNewBelow 仅控制红点"新"徽标）。
+- 点击按钮：先 `userScrolledUpRef.current = false` 解锁，再 `scrollToBottom(true)` 滚到底部。
+
+
+
 ## [0.1.10] - 2026-09-10
 
 ### 🐛 修复
