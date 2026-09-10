@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.10] - 2026-09-10
+
+### 🐛 修复
+
+- **designer 输出"完成"但 executor 没接到画图任务**：designer 提示词原本让输出 3 段（NODES/EDGES/LAYOUT），输出完用 DISPATCH: none 结束 → executor 根本不被派活。修复：
+ 1. designer 提示词改为 2 段（NODES + EDGES），末尾**必须**写 `DISPATCH: @执行代理`，让调度器派 executor 来画
+ 2. executor 提示词加规则："**If a Designer blueprint is present in context, USE IT DIRECTLY - do not re-interpret the original task**"（之前 executor 会重新理解需求再画一次，导致画图延迟/不一致）
+
+### ⚡ 优化
+
+- 端到端画图流程闭环：PM 派活 → designer 输出设计稿 + DISPATCH: @执行代理 → executor 采用设计稿调 draw_flowchart 一次画完 → 系统反查画布真相对比数字（v0.1.6）
+
 ## [0.1.9] - 2026-09-10
 
 ### 🐛 修复（v0.1.8 不彻底，重做）
