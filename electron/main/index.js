@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
-const mcpServer = require('./mcp-server')
+const mcpServer = require('./mcp-server.cjs')
 
 // 计算正确的路径
 // 打包后 asar 内的结构：
