@@ -1,5 +1,5 @@
 import { useMcpStore, useExperienceStore, useToolStore, useChatStore, useModelStore } from '@/store'
-import { parseXmlToCells, salvageFromBrokenXml, DiagramCellInfo, countDiagramCells } from '@/utils/helpers'
+import { parseXmlToCells, salvageFromBrokenXml, DiagramCellInfo } from '@/utils/helpers'
 import { builtinTools } from '@/config/tools'
 import type { ChatMessage } from '@/types'
 import { callAI } from './aiService'
@@ -1964,7 +1964,7 @@ async function executeSetEdgeRouting(args: Record<string, any>) {
   }
 
   try {
-    const mode = (args.mode || 'libavoid') as EdgeRoutingMode
+    const mode = (args.mode || 'LIB_AVOID') as EdgeRoutingMode
 
     const xml = await win.drawioApi.getXml()
     const cells = parseXmlToCells(xml || '')
@@ -1975,7 +1975,7 @@ async function executeSetEdgeRouting(args: Record<string, any>) {
     let updated = setEdgeRoutingMode(cells, mode)
 
     // 如果是 libavoid 模式，额外添加平行边分散
-    if (mode === 'libavoid') {
+    if (mode === 'LIB_AVOID') {
       updated = spreadParallelEdges(updated)
     }
 

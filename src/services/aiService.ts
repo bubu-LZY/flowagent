@@ -331,15 +331,19 @@ export async function callAI(params: CallAIParams): Promise<string> {
       : (modelMaxTokens && modelMaxTokens > 0)
         ? modelMaxTokens
         : 4096
-    const stream = await client.chat.completions.create({
-      model: modelConfig.model,
-      messages: openaiMessages,
-      stream: true,
-      max_tokens: maxTokens,
-      tools: tools.length > 0 ? tools : undefined,
-      tool_choice: tools.length > 0 ? 'auto' : undefined,
-      signal: controller.signal, // 【修复 P2-5】传入 AbortSignal，支持真·中断
-    })
+    const stream = await client.chat.completions.create(
+      {
+        model: modelConfig.model,
+        messages: openaiMessages,
+        stream: true,
+        max_tokens: maxTokens,
+        tools: tools.length > 0 ? tools : undefined,
+        tool_choice: tools.length > 0 ? 'auto' : undefined,
+      },
+      {
+        signal: controller.signal, // 【修复 P2-5】传入 AbortSignal，支持真·中断
+      }
+    )
 
     let fullContent = ''
     let fullReasoning = ''

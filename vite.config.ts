@@ -51,9 +51,6 @@ function electronCopyPlugin() {
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  // 强制使用固定的 config 路径（防止 vite 在 cwd 旁生成 vite.config.ts.timestamp-*.mjs 临时文件）
-  // 临时文件可能包含机器绝对路径，泄露到 git 索引里
-  configFile: fileURLToPath(new URL('./vite.config.ts', import.meta.url)),
   plugins: [
     react(),
     electronCopyPlugin(),

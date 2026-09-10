@@ -152,7 +152,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   const [qualityScore, setQualityScore] = useState<number | null>(null)
   const [qualityChecking, setQualityChecking] = useState(false)
   const [layoutRunning, setLayoutRunning] = useState(false)
-  const [currentRoutingMode, setCurrentRoutingMode] = useState<EdgeRoutingMode>('orthogonal')
+  const [currentRoutingMode, setCurrentRoutingMode] = useState<EdgeRoutingMode>('ORTHOGONAL')
   const toolbarRef = useRef<HTMLDivElement>(null)
   const hasLoadedSessionDiagram = useRef(false)
   const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -1046,7 +1046,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
                               const cells = parseXmlToCells(xml || '')
                               if (cells) {
                                 let updated = setEdgeRoutingMode(cells, mode)
-                                if (mode === 'libavoid') {
+                                if (mode === 'LIB_AVOID') {
                                   updated = spreadParallelEdges(updated)
                                 }
                                 const newXml = buildXmlFromCellsLocal(updated)
