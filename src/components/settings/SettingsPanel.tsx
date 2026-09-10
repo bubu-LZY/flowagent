@@ -1438,6 +1438,9 @@ const McpSettings: React.FC = () => {
   const [status, setStatus] = useState<any>(null)
   const [logs, setLogs] = useState<any[]>([])
   const [banList, setBanList] = useState<any[]>([])
+  const [ipWhitelist, setIpWhitelist] = useState<string[]>([])
+  const [newWhitelistIp, setNewWhitelistIp] = useState('')
+  const [lanAccessEnabled, setLanAccessEnabled] = useState(false)
   const [copiedField, setCopiedField] = useState<string | null>(null)
 
   const loadStatus = useCallback(async () => {
@@ -1476,6 +1479,92 @@ const McpSettings: React.FC = () => {
     }
   }, [])
 
+  // 加载 IP 白名单
+  const loadIpWhitelist = useCallback(async () => {
+    try {
+      const win = window as any
+      if (win.electronAPI?.mcp?.getIpWhitelist) {
+        const result = await win.electronAPI.mcp.getIpWhitelist()
+        setIpWhitelist(result?.list || [])
+      }
+    } catch (e) {
+      console.error('获取 IP 白名单失败:', e)
+    }
+  }, [])
+
+  // 加载局域网访问状态
+  const loadLanAccess = useCallback(async () => {
+    try {
+      const win = window as any
+      if (win.electronAPI?.mcp?.getAllowLan) {
+        const result = await win.electronAPI.mcp.getAllowLan()
+        setLanAccessEnabled(result?.enabled || false)
+      }
+    } catch (e) {
+      console.error('获取局域网访问状态失败:', e)
+    }
+  }, [])
+
+  // 切换局域网访问
+  const handleToggleLanAccess = async () => {
+    const newState = !lanAccessEnabled
+    if (newState && ipWhitelist.length === 0) {
+      if (!confirm('⚠️ 开启局域网访问前建议先添加 IP 白名单。\n\n没有白名单的话，同一局域网内所有设备都可能访问您的 MCP 服务。\n\n确定要继续吗？')) {
+        return
+      }
+    }
+    try {
+      const win = window as any
+      await win.electronAPI.mcp.setAllowLan(newState)
+      setLanAccessEnabled(newState)
+      toast.success(newState ? '已开启局域网访问' : '已关闭局域网访问')
+      // 重启服务后刷新状态
+      setTimeout(() => {
+        loadStatus()
+      }, 1000)
+    } catch (e) {
+      toast.error('切换失败')
+    }
+  }
+
+  // 添加白名单 IP
+  const handleAddWhitelistIp = async () => {
+    const ip = newWhitelistIp.trim()
+    if (!ip) return
+    // 简单格式校验
+    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$/
+    if (!ipRegex.test(ip)) {
+      toast.error('IP 格式不正确')
+      return
+    }
+    try {
+      const win = window as any
+      const result = await win.electronAPI.mcp.addIpWhitelist(ip)
+      if (result?.success) {
+        toast.success('已添加到白名单')
+        setNewWhitelistIp('')
+        loadIpWhitelist()
+      } else {
+        toast.error('添加失败（可能已存在）')
+      }
+    } catch (e) {
+      toast.error('添加失败')
+    }
+  }
+
+  // 移除白名单 IP
+  const handleRemoveWhitelistIp = async (ip: string) => {
+    if (!confirm(`确定要从白名单中移除 ${ip} 吗？`)) return
+    try {
+      const win = window as any
+      await win.electronAPI.mcp.removeIpWhitelist(ip)
+      toast.success('已移除')
+      loadIpWhitelist()
+    } catch (e) {
+      toast.error('移除失败')
+    }
+  }
+
   const handleUnbanIp = async (ip: string) => {
     try {
       const win = window as any
@@ -1507,13 +1596,15 @@ const McpSettings: React.FC = () => {
     loadStatus()
     loadLogs()
     loadBanList()
+    loadIpWhitelist()
+    loadLanAccess()
     const timer = setInterval(() => {
       loadStatus()
       loadLogs()
       loadBanList()
     }, 3000)
     return () => clearInterval(timer)
-  }, [loadStatus, loadLogs, loadBanList])
+  }, [loadStatus, loadLogs, loadBanList, loadIpWhitelist, loadLanAccess])
 
   const handleRegenerateToken = async () => {
     if (!confirm('确定要重新生成 Token 吗？旧 Token 将立即失效，所有已配置的客户端需要更新。')) {
@@ -1936,6 +2027,73 @@ png_result = mcp.call_tool("export_diagram", {
               <span>请求日志审计（最近 100 条）</span>
             </li>
           </ul>
+        </div>
+      </div>
+
+      {/* 局域网访问 & IP 白名单 */}
+      <div>
+        <div className="text-sm font-medium text-gray-700 mb-3">局域网访问</div>
+        <div className="p-4 bg-amber-50 rounded-lg border border-amber-100 mb-3">
+          <p className="text-xs text-amber-700 leading-relaxed">
+            ⚠️ 开启局域网访问后，同一网络内的设备可以通过 IP 地址访问 MCP 服务。
+            请务必配合 IP 白名单使用，仅允许信任的设备访问。
+          </p>
+        </div>
+        <div className="flex items-center justify-between py-3 px-3 bg-gray-50 rounded-lg mb-4">
+          <div>
+            <div className="text-sm font-medium text-gray-800">允许局域网访问</div>
+            <div className="text-xs text-gray-500 mt-0.5">监听 0.0.0.0，允许同网络设备连接</div>
+          </div>
+          <button
+            onClick={handleToggleLanAccess}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              lanAccessEnabled ? 'bg-indigo-500' : 'bg-gray-300'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                lanAccessEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        <div className="text-sm font-medium text-gray-700 mb-2">IP 白名单</div>
+        <p className="text-xs text-gray-500 mb-2">
+          非本地 IP 必须在白名单中才能访问 MCP 服务。支持单个 IP（如 192.168.1.100）和网段（如 192.168.1.0/24）。
+        </p>
+        <div className="flex gap-2 mb-3">
+          <input
+            type="text"
+            value={newWhitelistIp}
+            onChange={(e) => setNewWhitelistIp(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleAddWhitelistIp()}
+            placeholder="输入 IP 地址或网段，如 192.168.1.0/24"
+            className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+          />
+          <button
+            onClick={handleAddWhitelistIp}
+            className="px-4 py-2 text-sm text-white bg-indigo-500 rounded-lg hover:bg-indigo-600 transition-colors"
+          >
+            添加
+          </button>
+        </div>
+        <div className="space-y-1.5 max-h-32 overflow-y-auto">
+          {ipWhitelist.length === 0 ? (
+            <div className="text-xs text-gray-400 text-center py-4">暂无白名单 IP</div>
+          ) : (
+            ipWhitelist.map((ip) => (
+              <div key={ip} className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg">
+                <span className="text-sm text-gray-700 font-mono">{ip}</span>
+                <button
+                  onClick={() => handleRemoveWhitelistIp(ip)}
+                  className="text-xs text-red-500 hover:text-red-600"
+                >
+                  移除
+                </button>
+              </div>
+            ))
+          )}
         </div>
       </div>
 

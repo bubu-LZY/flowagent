@@ -21,8 +21,10 @@ const { app } = require('electron')
 
 // ========== 配置 ==========
 const DEFAULT_PORT = 38765
+const DEFAULT_HOST = '127.0.0.1' // 默认仅本地访问
 const RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 分钟
-const RATE_LIMIT_MAX_REQUESTS = 60 // 每分钟最多 60 次
+const RATE_LIMIT_MAX_REQUESTS = 60 // 本地 IP 每分钟最多 60 次
+const RATE_LIMIT_MAX_REQUESTS_REMOTE = 20 // 非白名单远程 IP 每分钟最多 20 次（更严格）
 
 // Token 存储路径（用户文档目录下的 FlowAgent/settings.json）
 function getSettingsPath() {
@@ -156,6 +158,98 @@ const authFailCounts = new Map()
 const rateFailCounts = new Map()
 // 永久拉黑 IP 列表（持久化到 settings.json）
 let permanentBanList = []
+// IP 白名单列表（允许访问的非本地 IP，持久化到 settings.json）
+let ipWhitelist = []
+// 是否允许局域网访问（即监听 0.0.0.0）
+let allowLanAccess = false
+// 允许的 CORS origin 列表
+let allowedOrigins = []
+
+// 判断是否为本地 IP
+function isLocalIp(ip) {
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1' || ip === 'localhost'
+}
+
+// 判断 IP 是否在白名单中（支持精确匹配和 CIDR 段匹配，如 192.168.1.0/24）
+function isIpWhitelisted(ip) {
+  if (isLocalIp(ip)) return true // 本地 IP 始终允许
+  for (const entry of ipWhitelist) {
+    if (entry.includes('/')) {
+      // CIDR 段匹配
+      if (ipInCidr(ip, entry)) return true
+    } else {
+      // 精确匹配
+      if (ip === entry) return true
+    }
+  }
+  return false
+}
+
+// 简单的 IPv4 CIDR 匹配
+function ipInCidr(ip, cidr) {
+  try {
+    const [range, prefixLen] = cidr.split('/')
+    const prefix = parseInt(prefixLen, 10)
+    if (isNaN(prefix) || prefix < 0 || prefix > 32) return false
+    
+    const ipNum = ipToLong(ip)
+    const rangeNum = ipToLong(range)
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
+    
+    return (ipNum & mask) === (rangeNum & mask)
+  } catch (e) {
+    return false
+  }
+}
+
+function ipToLong(ip) {
+  const parts = ip.split('.')
+  if (parts.length !== 4) return 0
+  return ((parseInt(parts[0], 10) << 24) |
+          (parseInt(parts[1], 10) << 16) |
+          (parseInt(parts[2], 10) << 8) |
+          parseInt(parts[3], 10)) >>> 0
+}
+
+// 加载 IP 白名单和局域网设置
+function loadIpWhitelist() {
+  try {
+    const settingsPath = getSettingsPath()
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+      if (Array.isArray(settings.ipWhitelist)) {
+        ipWhitelist = settings.ipWhitelist
+      }
+      if (typeof settings.allowLanAccess === 'boolean') {
+        allowLanAccess = settings.allowLanAccess
+      }
+      if (Array.isArray(settings.allowedOrigins)) {
+        allowedOrigins = settings.allowedOrigins
+      }
+    }
+  } catch (e) {
+    console.error('[MCP] 加载 IP 白名单失败:', e.message)
+  }
+}
+
+// 保存 IP 白名单配置
+function saveIpWhitelist() {
+  try {
+    const settingsPath = getSettingsPath()
+    let settings = {}
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'))
+    }
+    settings.ipWhitelist = ipWhitelist
+    settings.allowLanAccess = allowLanAccess
+    settings.allowedOrigins = allowedOrigins
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8')
+    return true
+  } catch (e) {
+    console.error('[MCP] 保存 IP 白名单失败:', e.message)
+    return false
+  }
+}
 
 // 加载永久拉黑列表
 function loadPermanentBans() {
@@ -337,13 +431,16 @@ function checkRateLimit(ip) {
   let entry = rateLimitMap.get(ip)
   
   if (!entry || now > entry.resetTime) {
-    entry = { count: 0, resetTime: now + RATE_LIMIT_WINDOW_MS }
+    // 本地 IP 和白名单 IP 限制宽松，非白名单远程 IP 更严格
+    const maxRequests = isIpWhitelisted(ip) ? RATE_LIMIT_MAX_REQUESTS : RATE_LIMIT_MAX_REQUESTS_REMOTE
+    entry = { count: 0, resetTime: now + RATE_LIMIT_WINDOW_MS, maxRequests }
     rateLimitMap.set(ip, entry)
   }
   
   entry.count++
   
-  if (entry.count > RATE_LIMIT_MAX_REQUESTS) {
+  const maxRequests = entry.maxRequests || RATE_LIMIT_MAX_REQUESTS
+  if (entry.count > maxRequests) {
     return false
   }
   return true
@@ -906,18 +1003,27 @@ function getClientIp(req) {
 }
 
 /**
- * 判断是否为允许的本地 Origin
- * 只允许来自 localhost / 127.0.0.1 / 0.0.0.0 的请求，任意端口
+ * 判断是否为允许的 Origin
+ * - localhost / 127.0.0.1 / 0.0.0.0 始终允许
+ * - 用户配置的 allowedOrigins 列表中的也允许
  */
 function isAllowedOrigin(origin) {
   if (!origin) return false
   try {
     const url = new URL(origin)
     const hostname = url.hostname
-    return hostname === 'localhost' 
-      || hostname === '127.0.0.1' 
-      || hostname === '0.0.0.0'
-      || hostname === '::1'
+    // 本地始终允许
+    if (hostname === 'localhost' 
+        || hostname === '127.0.0.1' 
+        || hostname === '0.0.0.0'
+        || hostname === '::1') {
+      return true
+    }
+    // 配置的白名单 origin
+    if (allowedOrigins.includes(origin)) return true
+    // 也检查 hostname 是否在白名单 IP 中
+    if (isIpWhitelisted(hostname)) return true
+    return false
   } catch (e) {
     return false
   }
@@ -1010,13 +1116,31 @@ async function handleMessages(req, res, body) {
 
 // ========== 启动/停止服务 ==========
 
+// 获取监听地址
+function getListenHost() {
+  return allowLanAccess ? '0.0.0.0' : DEFAULT_HOST
+}
+
+// 重启服务（切换局域网访问模式时调用）
+function restartServer(port = DEFAULT_PORT) {
+  stopServer()
+  // 稍等一下再重启
+  setTimeout(() => {
+    startServer(port)
+  }, 500)
+  return { success: true, message: '服务正在重启' }
+}
+
 function startServer(port = DEFAULT_PORT) {
   if (isRunning) {
-    return { success: true, port, token: getMcpToken() }
+    return { success: true, port, host: getListenHost(), token: getMcpToken() }
   }
 
   // 确保 Token 存在
   getMcpToken()
+
+  // 加载 IP 白名单配置（包含局域网访问开关）
+  loadIpWhitelist()
 
   // 加载永久拉黑列表
   loadPermanentBans()
@@ -1034,6 +1158,15 @@ function startServer(port = DEFAULT_PORT) {
       res.writeHead(403, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Forbidden: IP is banned' }))
       logRequest(pathname, ip, false, 'banned ip rejected')
+      return
+    }
+
+    // IP 白名单检查：非本地 IP 必须在白名单中才能访问
+    // 即使开启了局域网访问，也需要 IP 在白名单中（防止内网其他设备随意访问）
+    if (!isIpWhitelisted(ip)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Forbidden: IP not in whitelist' }))
+      logRequest(pathname, ip, false, 'ip not in whitelist')
       return
     }
 
@@ -1103,9 +1236,11 @@ function startServer(port = DEFAULT_PORT) {
     res.end(JSON.stringify({ error: 'Not found' }))
   })
 
-  server.listen(port, '127.0.0.1', () => {
+  const listenHost = getListenHost()
+  server.listen(port, listenHost, () => {
     isRunning = true
-    console.log(`[MCP] Server started on http://127.0.0.1:${port}`)
+    console.log(`[MCP] Server started on http://${listenHost}:${port}`)
+    console.log(`[MCP] LAN access: ${allowLanAccess ? 'enabled' : 'disabled'}`)
     console.log(`[MCP] Token: ${mcpToken}`)
   })
 
@@ -1161,6 +1296,7 @@ function getRecentLogs(limit = 50) {
 module.exports = {
   startServer,
   stopServer,
+  restartServer,
   getStatus,
   getRecentLogs,
   regenerateToken,
@@ -1170,6 +1306,49 @@ module.exports = {
   getBanList,
   unbanIp,
   addPermanentBan,
+  getIpWhitelist: () => [...ipWhitelist],
+  addIpToWhitelist: (ip) => {
+    if (!ipWhitelist.includes(ip)) {
+      ipWhitelist.push(ip)
+      saveIpWhitelist()
+      return true
+    }
+    return false
+  },
+  removeIpFromWhitelist: (ip) => {
+    const before = ipWhitelist.length
+    ipWhitelist = ipWhitelist.filter(i => i !== ip)
+    if (ipWhitelist.length !== before) {
+      saveIpWhitelist()
+      return true
+    }
+    return false
+  },
+  getAllowLanAccess: () => allowLanAccess,
+  setAllowLanAccess: (enabled) => {
+    allowLanAccess = enabled
+    saveIpWhitelist()
+    return true
+  },
+  getAllowedOrigins: () => [...allowedOrigins],
+  addAllowedOrigin: (origin) => {
+    if (!allowedOrigins.includes(origin)) {
+      allowedOrigins.push(origin)
+      saveIpWhitelist()
+      return true
+    }
+    return false
+  },
+  removeAllowedOrigin: (origin) => {
+    const before = allowedOrigins.length
+    allowedOrigins = allowedOrigins.filter(o => o !== origin)
+    if (allowedOrigins.length !== before) {
+      saveIpWhitelist()
+      return true
+    }
+    return false
+  },
   MCP_TOOLS,
   DEFAULT_PORT,
+  DEFAULT_HOST,
 }

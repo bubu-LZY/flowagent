@@ -922,6 +922,43 @@ updatedAt: ${now}
     return { success: result }
   })
 
+  // IP 白名单管理
+  ipcMain.handle('mcp:get-ip-whitelist', () => {
+    return { success: true, list: mcpServer.getIpWhitelist() }
+  })
+  ipcMain.handle('mcp:add-ip-whitelist', (_, ip) => {
+    const result = mcpServer.addIpToWhitelist(ip)
+    return { success: result }
+  })
+  ipcMain.handle('mcp:remove-ip-whitelist', (_, ip) => {
+    const result = mcpServer.removeIpFromWhitelist(ip)
+    return { success: result }
+  })
+
+  // 局域网访问开关
+  ipcMain.handle('mcp:get-allow-lan', () => {
+    return { success: true, enabled: mcpServer.getAllowLanAccess() }
+  })
+  ipcMain.handle('mcp:set-allow-lan', (_, enabled) => {
+    mcpServer.setAllowLanAccess(enabled)
+    // 切换监听地址需要重启服务
+    mcpServer.restartServer()
+    return { success: true }
+  })
+
+  // CORS Origin 白名单
+  ipcMain.handle('mcp:get-allowed-origins', () => {
+    return { success: true, list: mcpServer.getAllowedOrigins() }
+  })
+  ipcMain.handle('mcp:add-allowed-origin', (_, origin) => {
+    const result = mcpServer.addAllowedOrigin(origin)
+    return { success: result }
+  })
+  ipcMain.handle('mcp:remove-allowed-origin', (_, origin) => {
+    const result = mcpServer.removeAllowedOrigin(origin)
+    return { success: result }
+  })
+
   app.on('window-all-closed', () => {
     // 不退出，保持在托盘运行
     if (process.platform !== 'darwin') {
