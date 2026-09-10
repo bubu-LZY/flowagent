@@ -199,6 +199,11 @@ class MultiAgentOrchestrator {
       this.failureCounts.clear()
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
+      // 重置 chatStore 中的会话级状态（轮数、等待用户、停止状态）
+      // 这些状态存在全局 store 里，切会话必须重置，否则新会话会继承旧会话的轮数
+      useChatStore.getState().resetRound()
+      useChatStore.getState().setWaitingForUser(false)
+      useChatStore.getState().resetStopped()
       this.lastSessionId = currentSessionId
     }
   }
@@ -1158,7 +1163,9 @@ let fullContent = ''
       // 完全不依赖 AI 自觉写 DISPATCH 行，从机制上保证流程不会断
       if (success && !useChatStore.getState().waitingForUser && !useChatStore.getState().isStopped) {
         // 3.1 检测是否 @了用户 → 暂停调度等待用户回复
-        const mentionedNames = parseMentions(fullContent)
+        // 注意：先去掉 <think> 标签内容，防止 think 里的"用户"概念词被误匹配
+        const contentForMentionCheck = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '')
+        const mentionedNames = parseMentions(contentForMentionCheck)
         const mentionsUser = mentionedNames.some((name) => {
           const n = name.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
           return n === 'user' || n === '用户'
@@ -1208,7 +1215,9 @@ let fullContent = ''
 
         // 3.3 【核心】代码状态机：根据当前角色自动决定下一步
         // AI 的 DISPATCH 行只是参考，最终由代码拍板
-        const nextAction = this.determineNextAction(agent, fullContent, allToolCalls.length, activeAgents)
+        // 注意：先去掉 <think> 标签，只看实际输出内容
+        const cleanContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '')
+        const nextAction = this.determineNextAction(agent, cleanContent, allToolCalls.length, activeAgents)
 
         if (nextAction.type === 'retry') {
           // 当前智能体输出不合格，让它重写

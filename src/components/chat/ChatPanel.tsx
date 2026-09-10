@@ -5,7 +5,7 @@ import { AgentList } from './AgentList'
 import { SessionSidebar } from './SessionSidebar'
 import { SummaryPanel } from './SummaryPanel'
 import { LogPanel } from './LogPanel'
-import { useChatStore, useAgentStore, useUIStore } from '@/store'
+import { useChatStore, useAgentStore, useUIStore, useModelStore } from '@/store'
 import { useSessionStore } from '@/store/sessionStore'
 import { useSummaryStore } from '@/store/summaryStore'
 import { generateId, parseMentions, isElectron, copyToClipboard, extractMentionedAgentIds } from '@/utils/helpers'
@@ -16,7 +16,8 @@ import { multiAgentOrchestrator } from '@/services/orchestrator'
 export const ChatPanel: React.FC = () => {
   const { messages, setMessages, addMessage, appendToMessage, appendThinkingToMessage, updateMessage, setStreaming, streamingAgents, discussionRound, maxRounds, waitingForUser, isStopped, stopAll, resetStopped } = useChatStore()
   const { getActiveAgents } = useAgentStore()
-  const { isAgentPanelOpen, toggleAgentPanel, summaryEnabled } = useUIStore()
+  const { isAgentPanelOpen, toggleAgentPanel, summaryEnabled, isSettingsOpen, toggleSettings } = useUIStore()
+  const { models, getDefaultModel } = useModelStore()
   const { 
     currentSessionId, 
     getCurrentSession, 
@@ -192,6 +193,18 @@ export const ChatPanel: React.FC = () => {
     const activeAgents = getActiveAgents()
     if (activeAgents.length === 0) {
       alert('请至少激活一个智能体！')
+      return
+    }
+
+    // 检查是否配置了大模型
+    const defaultModel = getDefaultModel()
+    if (!defaultModel || !defaultModel.apiKey) {
+      const goConfig = confirm(
+        '⚠️ 还没有配置大模型，无法进行 AI 对话。\n\n请先在设置中配置模型 API 地址和密钥。\n\n是否立即打开设置？'
+      )
+      if (goConfig) {
+        toggleSettings()
+      }
       return
     }
 

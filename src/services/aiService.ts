@@ -304,12 +304,10 @@ export async function callAI(params: CallAIParams): Promise<string> {
   const client = getOpenAIClient(agentId)
   const modelConfig = useModelStore.getState().getAgentModel(agentId)
 
-  // 如果没有配置模型，使用模拟响应
+  // 没有配置模型时直接报错，不再返回模拟响应
+  // 模拟响应会导致用户以为 AI 在工作，但实际上是假数据，而且调度会出各种问题
   if (!client || !modelConfig) {
-    const result = await mockAIResponse(agentId, throttledContent.push)
-    throttledContent.flush()
-    throttledReasoning.flush()
-    return result
+    throw new Error('未配置大模型，请先在设置中添加模型配置（API 地址 + 密钥 + 模型名）。')
   }
 
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null
