@@ -563,6 +563,7 @@ interface UIState {
   //          'skill-aiguide-drawio'（Snailclimb AIGuide drawio-chart）
   drawSkill: 'skill-drawio-architecture' | 'skill-aiguide-drawio' | 'skill-github-standard'
   summaryEnabled: boolean // 画图总结功能开关
+  viewMode: 'default' | 'chat-only' | 'canvas-only' // 视图模式：默认/纯对话/纯画板
 
   setChatPanelWidth: (width: number) => void
   toggleAgentPanel: () => void
@@ -571,6 +572,7 @@ interface UIState {
   setSettingsTab: (tab: UIState['settingsTab']) => void
   setDrawSkill: (id: UIState['drawSkill']) => void
   toggleSummaryEnabled: () => void
+  setViewMode: (mode: UIState['viewMode']) => void
 }
 
 export const useUIStore = create<UIState>()(
@@ -583,6 +585,7 @@ export const useUIStore = create<UIState>()(
       settingsTab: 'model',
       drawSkill: 'skill-drawio-architecture',
       summaryEnabled: true, // 画图总结功能开关
+      viewMode: 'default', // 默认模式：聊天+画板
 
       setChatPanelWidth: (width) => set({ chatPanelWidth: width }),
       toggleAgentPanel: () =>
@@ -595,10 +598,11 @@ export const useUIStore = create<UIState>()(
       setDrawSkill: (id) => set({ drawSkill: id }),
       toggleSummaryEnabled: () =>
         set((state) => ({ summaryEnabled: !state.summaryEnabled })),
+      setViewMode: (mode) => set({ viewMode: mode }),
     }),
     {
       name: 'flow-agent-ui',
-      partialize: (state) => ({ chatPanelWidth: state.chatPanelWidth, drawSkill: state.drawSkill }),
+      partialize: (state) => ({ chatPanelWidth: state.chatPanelWidth, drawSkill: state.drawSkill, viewMode: state.viewMode }),
     }
   )
 )

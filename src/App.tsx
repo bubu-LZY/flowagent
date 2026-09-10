@@ -2,8 +2,10 @@ import { ChatPanel } from '@/components/chat/ChatPanel'
 import { DrawIoCanvas } from '@/components/canvas/DrawIoCanvas'
 import { SettingsPanel } from '@/components/settings/SettingsPanel'
 import { ExperienceReviewPanel } from '@/components/experience/ExperienceReviewPanel'
+import { McpTaskPanel } from '@/components/mcp/McpTaskPanel'
 import { ResizableLayout } from '@/components/common/ResizableLayout'
 import { UpdateModal } from '@/components/common/UpdateModal'
+import { ModeSwitcher } from '@/components/common/ModeSwitcher'
 import { useUIStore } from '@/store'
 import { Toaster, toast } from 'sonner'
 import { isElectron, getElectronAPI } from '@/utils/helpers'
@@ -31,8 +33,10 @@ function App() {
   }
 
   const { toggleSettings } = useUIStore()
+  const viewMode = useUIStore((s) => s.viewMode)
   const pendingCount = useExperienceStore((s) => s.docs.filter((d) => d.status === 'pending').length)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [mcpPanelOpen, setMcpPanelOpen] = useState(false)
   const [updateModalOpen, setUpdateModalOpen] = useState(false)
   const [latestRelease, setLatestRelease] = useState<ReleaseInfo | null>(null)
   const [currentVersion, setCurrentVersion] = useState('0.2.0')
@@ -104,6 +108,10 @@ function App() {
           <div className="text-gray-800 font-semibold text-[13px]">Flowchart Agent</div>
           <span className="text-gray-400 text-[11px]">v{currentVersion}</span>
         </div>
+
+        {/* 模式切换器（居中） */}
+        <ModeSwitcher />
+
         <div className="flex items-center gap-1">
           <button
             onClick={handleOpenCanvasWindow}
@@ -114,6 +122,14 @@ function App() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
             </svg>
             画布窗口
+          </button>
+          <button
+            onClick={() => setMcpPanelOpen(true)}
+            className="px-2.5 py-1.5 text-[12px] text-gray-600 hover:text-gray-900 hover:bg-black/5 rounded-md transition-colors flex items-center gap-1.5"
+            title="MCP 远程调用任务面板"
+          >
+            <span className="text-sm">🔌</span>
+            MCP 任务
           </button>
           <button
             onClick={() => setReviewOpen(true)}
@@ -143,12 +159,24 @@ function App() {
 
       {/* 主内容区 */}
       <div className="flex-1 overflow-hidden">
-        <ResizableLayout
-          storageKey="flow-agent-layout"
-          defaultLeftPercent={38}
-          leftPanel={<ChatPanel />}
-          rightPanel={<DrawIoCanvas />}
-        />
+        {viewMode === 'default' && (
+          <ResizableLayout
+            storageKey="flow-agent-layout"
+            defaultLeftPercent={38}
+            leftPanel={<ChatPanel />}
+            rightPanel={<DrawIoCanvas />}
+          />
+        )}
+        {viewMode === 'chat-only' && (
+          <div className="w-full h-full">
+            <ChatPanel />
+          </div>
+        )}
+        {viewMode === 'canvas-only' && (
+          <div className="w-full h-full">
+            <DrawIoCanvas />
+          </div>
+        )}
       </div>
 
       {/* 设置面板 */}
@@ -156,6 +184,9 @@ function App() {
 
       {/* 经验沉淀待审核面板 */}
       <ExperienceReviewPanel isOpen={reviewOpen} onClose={() => setReviewOpen(false)} />
+
+      {/* MCP 远程调用任务面板 */}
+      <McpTaskPanel isOpen={mcpPanelOpen} onClose={() => setMcpPanelOpen(false)} />
 
       {/* 更新提示弹窗 */}
       <UpdateModal

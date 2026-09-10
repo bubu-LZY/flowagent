@@ -192,3 +192,18 @@ export interface DiagramVersion {
   createdAt: number
   createdBy: 'user' | 'agent' | 'auto'  // 谁创建的
 }
+
+// MCP 远程调用任务
+export interface McpTask {
+  id: string
+  toolName: string       // 调用的工具名
+  args: Record<string, any> // 调用参数
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  sessionId: string      // 对应的会话ID（后台任务会话）
+  result?: any           // 执行结果
+  error?: string         // 错误信息
+  diagramXml?: string    // 完成时的画布 XML 快照
+  createdAt: number
+  completedAt?: number
+  remoteIp?: string      // 调用方 IP
+}

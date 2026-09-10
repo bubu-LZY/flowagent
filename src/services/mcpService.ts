@@ -3,11 +3,52 @@
  * 
  * 注册所有 MCP 工具到 window.__mcpHandlers，
  * 主进程的 MCP 服务通过 executeJavaScript 调用这些处理器
+ * 
+ * 重要：MCP 远程调用在后台会话中执行，不影响用户当前正在使用的会话
  */
 
-import { useChatStore, useAgentStore, useModelStore, useExperienceStore, useToolStore } from '@/store'
+import { useChatStore, useAgentStore, useModelStore, useExperienceStore, useToolStore, useUIStore } from '@/store'
 import { useSessionStore } from '@/store/sessionStore'
 import { multiAgentOrchestrator } from './orchestrator'
+import { executeTool } from './toolExecutor'
+import { generateId } from '@/utils/helpers'
+import type { McpTask } from '@/types'
+
+// ========== MCP 任务状态管理 ==========
+// 存在模块级变量里，同时持久化到 sessionStore 的 meta 中
+let mcpTasks: McpTask[] = []
+
+export function getMcpTasks(): McpTask[] {
+  return [...mcpTasks]
+}
+
+export function getMcpTask(id: string): McpTask | undefined {
+  return mcpTasks.find(t => t.id === id)
+}
+
+function addTask(task: McpTask) {
+  mcpTasks.unshift(task)
+  // 最多保留 100 条
+  if (mcpTasks.length > 100) {
+    mcpTasks.length = 100
+  }
+  // 通知 UI 更新
+  const win = window as any
+  if (win.__mcpTaskUpdateCallback) {
+    try { win.__mcpTaskUpdateCallback() } catch (e) {}
+  }
+}
+
+function updateTask(id: string, updates: Partial<McpTask>) {
+  const idx = mcpTasks.findIndex(t => t.id === id)
+  if (idx >= 0) {
+    mcpTasks[idx] = { ...mcpTasks[idx], ...updates }
+    const win = window as any
+    if (win.__mcpTaskUpdateCallback) {
+      try { win.__mcpTaskUpdateCallback() } catch (e) {}
+    }
+  }
+}
 
 // 全局 handler 注册表
 const handlers: Record<string, (args: any) => Promise<any>> = {}
@@ -16,17 +57,19 @@ const handlers: Record<string, (args: any) => Promise<any>> = {}
 export function registerMcpHandlers() {
   const win = window as any
   win.__mcpHandlers = handlers
+  win.__mcpGetTasks = getMcpTasks
+  win.__mcpGetTask = getMcpTask
 
-  // ===== 流程图工具 =====
-  registerHandler('mcp:draw_flowchart', handleDrawFlowchart)
-  registerHandler('mcp:get_diagram_xml', handleGetDiagramXml)
-  registerHandler('mcp:clear_diagram', handleClearDiagram)
-  registerHandler('mcp:add_nodes', handleAddNodes)
-  registerHandler('mcp:add_edges', handleAddEdges)
-  registerHandler('mcp:update_nodes', handleUpdateNodes)
-  registerHandler('mcp:remove_cells', handleRemoveCells)
-  registerHandler('mcp:analyze_diagram_quality', handleAnalyzeQuality)
-  registerHandler('mcp:auto_layout_diagram', handleAutoLayout)
+  // ===== 流程图工具（全部走 executeTool 统一实现，带会话隔离）=====
+  registerHandler('mcp:draw_flowchart', (args) => runCanvasTask('draw_flowchart', args))
+  registerHandler('mcp:get_diagram_xml', (args) => runCanvasTask('get_diagram_xml', args))
+  registerHandler('mcp:clear_diagram', (args) => runCanvasTask('clear_diagram', args))
+  registerHandler('mcp:add_nodes', (args) => runCanvasTask('add_nodes', args))
+  registerHandler('mcp:add_edges', (args) => runCanvasTask('add_edges', args))
+  registerHandler('mcp:update_nodes', (args) => runCanvasTask('update_nodes', args))
+  registerHandler('mcp:remove_cells', (args) => runCanvasTask('remove_cells', args))
+  registerHandler('mcp:analyze_diagram_quality', (args) => runCanvasTask('validate_diagram_quality', args))
+  registerHandler('mcp:auto_layout_diagram', (args) => runCanvasTask('auto_layout_diagram', args))
   registerHandler('mcp:export_diagram', handleExportDiagram)
 
   // ===== 会话管理 =====
@@ -56,214 +99,131 @@ function registerHandler(name: string, fn: (args: any) => Promise<any>) {
   handlers[name] = fn
 }
 
-// ========== 工具实现 ==========
+// ========== 画布任务：会话隔离执行 ==========
 
-// 获取 draw.io API（如果可用）
-function getDrawioApi(): any {
-  const win = window as any
-  return win.drawioApi || null
-}
+/**
+ * 在后台会话中执行画布操作，不影响用户当前会话
+ * 流程：保存当前会话 → 切换到目标会话 → 执行工具 → 切回原会话 → 返回结果
+ */
+async function runCanvasTask(toolName: string, args: any): Promise<any> {
+  const sessionStore = useSessionStore.getState()
+  const originalSessionId = sessionStore.currentSessionId
+  const taskId = generateId()
 
-// 确保画布就绪
-function ensureCanvasReady() {
-  const api = getDrawioApi()
-  if (!api) {
-    throw new Error('画布尚未就绪，请确保 draw.io 已加载完成')
-  }
-  return api
-}
+  // 确定目标会话 ID
+  let targetSessionId = args?.sessionId
+  let isNewSession = false
 
-// 获取当前会话 ID
-function getCurrentSessionId(args: any): string {
-  if (args?.sessionId) return args.sessionId
-  return useSessionStore.getState().currentSessionId || ''
-}
-
-// ===== 流程图工具 =====
-
-async function handleDrawFlowchart(args: any) {
-  const api = ensureCanvasReady()
-  const { nodes, edges, autoLayout = true, layoutDirection = 'TB', clearFirst = true } = args
-
-  if (!nodes || !Array.isArray(nodes) || nodes.length === 0) {
-    throw new Error('nodes 不能为空')
-  }
-  if (!edges || !Array.isArray(edges)) {
-    throw new Error('edges 不能为空')
+  if (!targetSessionId) {
+    // 没有指定会话，创建一个新的 MCP 任务会话
+    const title = args?.taskName || `MCP ${toolName} ${new Date().toLocaleTimeString()}`
+    const newSession = sessionStore.createSession(title)
+    targetSessionId = newSession.id
+    isNewSession = true
   }
 
-  if (clearFirst) {
-    await api.clear()
+  // 记录任务
+  const task: McpTask = {
+    id: taskId,
+    toolName,
+    args: args || {},
+    status: 'running',
+    sessionId: targetSessionId,
+    createdAt: Date.now(),
   }
+  addTask(task)
 
-  // 调 draw.io API 画图
-  const result = await api.drawFlowchart({
-    nodes,
-    edges,
-    autoLayout,
-    layoutDirection,
-  })
+  try {
+    // 如果目标会话不是当前会话，先切换过去
+    if (targetSessionId !== originalSessionId) {
+      sessionStore.switchSession(targetSessionId)
+      // 等待画布加载
+      await waitForCanvasReady(5000)
+    }
 
-  // 同步到会话存储
-  await syncCanvasToSession(args.sessionId)
+    // 执行工具（用 mcp-system 作为虚拟 agentId）
+    const result = await executeTool(toolName, args || {}, 'mcp-system')
 
-  return {
-    success: true,
-    nodeCount: result?.nodeCount || nodes.length,
-    edgeCount: result?.edgeCount || edges.length,
-    warnings: result?.warnings || [],
-  }
-}
-
-async function handleGetDiagramXml(args: any) {
-  const api = ensureCanvasReady()
-  const xml = await api.getXml()
-  return {
-    success: true,
-    xml,
-  }
-}
-
-async function handleClearDiagram(args: any) {
-  const api = ensureCanvasReady()
-  await api.clear()
-  await syncCanvasToSession(args?.sessionId)
-  return { success: true }
-}
-
-async function handleAddNodes(args: any) {
-  const api = ensureCanvasReady()
-  const { nodes } = args
-  if (!nodes || !Array.isArray(nodes)) {
-    throw new Error('nodes 参数无效')
-  }
-  const result = await api.addNodes(nodes)
-  await syncCanvasToSession(args.sessionId)
-  return { success: true, added: result?.count || nodes.length }
-}
-
-async function handleAddEdges(args: any) {
-  const api = ensureCanvasReady()
-  const { edges } = args
-  if (!edges || !Array.isArray(edges)) {
-    throw new Error('edges 参数无效')
-  }
-  const result = await api.addEdges(edges)
-  await syncCanvasToSession(args.sessionId)
-  return { success: true, added: result?.count || edges.length }
-}
-
-async function handleUpdateNodes(args: any) {
-  const api = ensureCanvasReady()
-  const { nodes } = args
-  if (!nodes || !Array.isArray(nodes)) {
-    throw new Error('nodes 参数无效')
-  }
-  const result = await api.updateNodes(nodes)
-  await syncCanvasToSession(args.sessionId)
-  return { success: true, updated: result?.count || nodes.length }
-}
-
-async function handleRemoveCells(args: any) {
-  const api = ensureCanvasReady()
-  const { ids } = args
-  if (!ids || !Array.isArray(ids)) {
-    throw new Error('ids 参数无效')
-  }
-  const result = await api.removeCells(ids)
-  await syncCanvasToSession(args.sessionId)
-  return { success: true, removed: result?.count || ids.length }
-}
-
-async function handleAnalyzeQuality(args: any) {
-  const api = ensureCanvasReady()
-  const xml = await api.getXml()
-  
-  // 简单质量分析
-  const { parseXmlToCells } = await import('@/utils/helpers')
-  const cells = parseXmlToCells(xml)
-  
-  let nodeCount = 0
-  let edgeCount = 0
-  const nodes: any[] = []
-  const edges: any[] = []
-  
-  if (cells) {
-    cells.forEach((cell: any) => {
-      if (cell.edge) {
-        edgeCount++
-        edges.push(cell)
-      } else {
-        nodeCount++
-        nodes.push(cell)
+    // 获取执行后的画布 XML 快照
+    let diagramXml: string | undefined
+    try {
+      const win = window as any
+      if (win.drawioApi?.getXml) {
+        diagramXml = await win.drawioApi.getXml()
       }
-    })
-  }
+    } catch (e) {
+      console.warn('[MCP] 获取画布快照失败:', e)
+    }
 
-  // 检测节点重叠（简单检测）
-  const overlaps: string[] = []
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i]
-      const b = nodes[j]
-      if (a.geometry && b.geometry) {
-        const ax = a.geometry.x || 0
-        const ay = a.geometry.y || 0
-        const aw = a.geometry.width || 100
-        const ah = a.geometry.height || 50
-        const bx = b.geometry.x || 0
-        const by = b.geometry.y || 0
-        const bw = b.geometry.width || 100
-        const bh = b.geometry.height || 50
-        
-        if (ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by) {
-          overlaps.push(`${a.value || a.id} ↔ ${b.value || b.id}`)
-        }
+    // 更新任务状态
+    updateTask(taskId, {
+      status: result.success ? 'completed' : 'failed',
+      result,
+      error: result.success ? undefined : (result.message || result.error),
+      diagramXml,
+      completedAt: Date.now(),
+    })
+
+    return result
+  } catch (error: any) {
+    console.error(`[MCP] 画布任务执行失败: ${toolName}`, error)
+    updateTask(taskId, {
+      status: 'failed',
+      error: error.message || '未知错误',
+      completedAt: Date.now(),
+    })
+    throw error
+  } finally {
+    // 切回原会话（如果切换过）
+    if (targetSessionId !== originalSessionId && originalSessionId) {
+      try {
+        sessionStore.switchSession(originalSessionId)
+      } catch (e) {
+        console.warn('[MCP] 切回原会话失败:', e)
       }
     }
   }
-
-  return {
-    success: true,
-    nodeCount,
-    edgeCount,
-    score: overlaps.length === 0 ? 9 : Math.max(3, 9 - overlaps.length * 2),
-    issues: [
-      ...overlaps.map(o => `节点重叠: ${o}`),
-    ],
-    hasOverlap: overlaps.length > 0,
-  }
 }
 
-async function handleAutoLayout(args: any) {
-  const api = ensureCanvasReady()
-  const { direction = 'TB' } = args
-  const result = await api.autoLayout({ direction })
-  await syncCanvasToSession(args.sessionId)
-  return { success: true, ...result }
+// 等待画布就绪
+function waitForCanvasReady(timeoutMs: number = 3000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now()
+    const check = () => {
+      const win = window as any
+      if (win.drawioApi?.isLoaded) {
+        resolve()
+      } else if (Date.now() - startTime > timeoutMs) {
+        reject(new Error('画布加载超时'))
+      } else {
+        setTimeout(check, 100)
+      }
+    }
+    check()
+  })
 }
 
+// ========== 导出流程图 ==========
 async function handleExportDiagram(args: any) {
-  const api = ensureCanvasReady()
   const { format = 'png' } = args
+  const win = window as any
   
+  if (!win.drawioApi?.isLoaded) {
+    throw new Error('画布尚未就绪')
+  }
+
   let result: any
   switch (format.toLowerCase()) {
     case 'xml':
     case 'drawio':
-      result = { xml: await api.getXml() }
+      result = { xml: await win.drawioApi.getXml() }
       break
     case 'png':
-      result = await api.exportPng()
-      break
     case 'svg':
-      result = await api.exportSvg()
-      break
-    case 'pdf':
-      result = await api.exportPdf()
+      result = await win.drawioApi.exportImage(format)
       break
     default:
-      throw new Error(`不支持的导出格式: ${format}`)
+      throw new Error(`不支持的导出格式: ${format}（支持 png/svg/xml/drawio）`)
   }
   
   return { success: true, format, ...result }
@@ -325,12 +285,26 @@ async function handleSendChatMessage(args: any) {
   const { message, sessionId, awaitCompletion = false, timeout = 120 } = args
   if (!message) throw new Error('message 不能为空')
 
+  // 如果指定了不同的会话，需要切换过去（聊天操作需要在目标会话中）
+  const sessionStore = useSessionStore.getState()
+  const originalSessionId = sessionStore.currentSessionId
+  let switched = false
+
+  if (sessionId && sessionId !== originalSessionId) {
+    sessionStore.switchSession(sessionId)
+    switched = true
+    // 等一下让状态同步
+    await new Promise(r => setTimeout(r, 200))
+  }
+
   const { addMessage } = useChatStore.getState()
-  
-  // 发送消息
   await addMessage(message as any)
 
   if (!awaitCompletion) {
+    // 如果切换过，切回去
+    if (switched && originalSessionId) {
+      sessionStore.switchSession(originalSessionId)
+    }
     return { success: true, status: 'processing', message: '消息已发送，智能体正在处理' }
   }
 
@@ -343,6 +317,9 @@ async function handleSendChatMessage(args: any) {
 
       if (elapsed > timeout) {
         clearInterval(checkInterval)
+        if (switched && originalSessionId) {
+          sessionStore.switchSession(originalSessionId)
+        }
         resolve({
           success: true,
           status: 'timeout',
@@ -360,11 +337,13 @@ async function handleSendChatMessage(args: any) {
 
       // 如果没有正在流式输出，且不在等待用户，且没有停止，则认为完成
       if (streamingAgents.length === 0 && !waitingForUser && !isStopped) {
-        // 再等 1 秒确认稳定
         setTimeout(() => {
           const state = useChatStore.getState()
           if (state.streamingAgents.length === 0 && !state.waitingForUser && !state.isStopped) {
             clearInterval(checkInterval)
+            if (switched && originalSessionId) {
+              sessionStore.switchSession(originalSessionId)
+            }
             const lastMessages = state.messages.slice(-10).map(m => ({
               id: m.id,
               agentId: m.agentId,
@@ -387,7 +366,8 @@ async function handleSendChatMessage(args: any) {
 }
 
 async function handleGetChatMessages(args: any) {
-  const { sessionId, limit } = args
+  // TODO: 支持按 sessionId 查询不同会话的消息
+  // 当前 chatStore 是全局的，需要先切换会话再读取
   const { messages } = useChatStore.getState()
   
   let result = messages.map(m => ({
@@ -401,6 +381,7 @@ async function handleGetChatMessages(args: any) {
     toolCalls: m.toolCalls?.length || 0,
   }))
   
+  const limit = args?.limit
   if (limit) result = result.slice(-limit)
   
   return { success: true, messages: result, total: messages.length }
@@ -497,33 +478,17 @@ async function handleGetSystemInfo() {
     success: true,
     info: {
       appName: 'Flowchart Agent',
-      version: '0.3.7',
+      version: '0.4.0',
       sessionCount: sessions.length,
       currentSessionId,
       currentSessionMessageCount: messages.length,
       activeAgentCount: agents.filter(a => a.isActive).length,
       totalAgentCount: agents.length,
+      mcpTaskCount: mcpTasks.length,
     },
   }
 }
 
 async function handleShowWindow() {
-  // 这个在主进程处理更合适，但为了统一接口，这里也留一个占位
   return { success: true, message: '窗口已激活' }
-}
-
-// ========== 辅助函数 ==========
-
-async function syncCanvasToSession(sessionId?: string) {
-  try {
-    const api = getDrawioApi()
-    if (!api) return
-    const xml = await api.getXml()
-    const { saveDiagramXml } = useSessionStore.getState()
-    if (saveDiagramXml) {
-      await saveDiagramXml(xml)
-    }
-  } catch (e) {
-    console.warn('[MCP] 同步画布到会话失败:', e)
-  }
 }
