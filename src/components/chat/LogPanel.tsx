@@ -6,6 +6,8 @@ import {
   LogEntry,
   LogType,
 } from '../../services/logService'
+import { copyToClipboard } from '@/utils/helpers'
+import { toast } from 'sonner'
 
 interface LogPanelProps {
   isOpen: boolean
@@ -60,6 +62,54 @@ export const LogPanel: React.FC<LogPanelProps> = ({ isOpen, onClose, sessionId, 
     { value: 'system', label: '系统' },
     { value: 'error', label: '错误' },
   ]
+
+  // 生成纯文本格式日志（用于复制）
+  const generateTextLog = (): string => {
+    const allLogs = getLogs(sessionId)
+    const lines: string[] = []
+    lines.push(`===== 会话日志 =====`)
+    lines.push(`会话：${sessionTitle || '未命名'}`)
+    lines.push(`日志条数：${allLogs.length}`)
+    lines.push(`导出时间：${new Date().toLocaleString('zh-CN')}`)
+    lines.push('')
+    for (const log of allLogs) {
+      const time = new Date(log.timestamp).toLocaleString('zh-CN')
+      const typeLabel = getTypeLabel(log.type)
+      const agentStr = log.agentName ? `[${log.agentName}]` : ''
+      lines.push(`[${time}] [${typeLabel}] ${agentStr} ${log.title}`)
+      if (log.content) {
+        lines.push(`  ${log.content.replace(/\n/g, '\n  ')}`)
+      }
+      if (log.metadata && Object.keys(log.metadata).length > 0) {
+        lines.push(`  元数据: ${JSON.stringify(log.metadata)}`)
+      }
+    }
+    return lines.join('\n')
+  }
+
+  const handleCopyAll = async () => {
+    const text = generateTextLog()
+    const ok = await copyToClipboard(text)
+    if (ok) {
+      toast.success(`已复制 ${logs.length} 条日志到剪贴板`)
+    } else {
+      toast.error('复制失败，请手动复制')
+    }
+  }
+
+  const getTypeLabel = (type: LogType): string => {
+    const map: Record<LogType, string> = {
+      message: '消息',
+      tool_call: '工具调用',
+      tool_result: '工具结果',
+      dispatch: '分发',
+      schedule: '调度',
+      system: '系统',
+      skill: 'Skill',
+      error: '错误',
+    }
+    return map[type] || type
+  }
 
   if (!isOpen) return null
 
@@ -136,11 +186,17 @@ export const LogPanel: React.FC<LogPanelProps> = ({ isOpen, onClose, sessionId, 
           )}
         </div>
 
-        {/* 底部提示 */}
+        {/* 底部操作栏 */}
         <div className="px-4 py-2 border-t border-gray-100 bg-gray-50 flex items-center justify-between">
-          <span className="text-[11px] text-gray-400">
-            💡 日志每月自动清理，仅保留当月记录
-          </span>
+          <button
+            onClick={handleCopyAll}
+            className="flex items-center gap-1.5 text-[11px] text-indigo-500 hover:text-indigo-600 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            一键复制全部日志
+          </button>
           <button
             onClick={() => {
               if (listRef.current) {

@@ -48,13 +48,13 @@ const MAX_AI_MESSAGES = 50
 const MAX_CONSECUTIVE_SAME_AGENT = 4
 
 // 智能体调度优先级（数字越小优先级越高）
-// 优先级：PM → 设计助手 → 评审员 → 执行代理 → 小白
-// 架构师和文档员已合并到设计助手和评审员中
+// 正确流程：PM → 设计 → 执行（画图）→ 评审 → 小白
+// 注意：执行代理必须在评审员之前，因为要先画完图再评审
 const AGENT_PRIORITY: Record<string, number> = {
   'project-manager': 0, // 项目经理优先级最高
   'designer': 1,
-  'reviewer': 2,
-  'executor': 3,
+  'executor': 2,
+  'reviewer': 3,
   'newbie': 4,
 }
 

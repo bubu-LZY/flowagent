@@ -4,6 +4,7 @@ import { ChatInput } from './ChatInput'
 import { AgentList } from './AgentList'
 import { SessionSidebar } from './SessionSidebar'
 import { SummaryPanel } from './SummaryPanel'
+import { LogPanel } from './LogPanel'
 import { useChatStore, useAgentStore, useUIStore } from '@/store'
 import { useSessionStore } from '@/store/sessionStore'
 import { useSummaryStore } from '@/store/summaryStore'
@@ -26,6 +27,7 @@ export const ChatPanel: React.FC = () => {
   const { generateSummary, isGenerating: isSummaryGenerating } = useSummaryStore()
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isSummaryOpen, setIsSummaryOpen] = useState(false)
+  const [isLogOpen, setIsLogOpen] = useState(false)
   const [inputValue, setInputValue] = useState('')
   // 仅画图模式：开启后所有消息自动 @executor，跳过 PM/评审
   const [drawOnly, setDrawOnly] = useState(false)
@@ -316,6 +318,15 @@ export const ChatPanel: React.FC = () => {
             </svg>
           </button>
           <button
+            onClick={() => setIsLogOpen(true)}
+            className="p-1.5 rounded-lg text-gray-400 hover:bg-gray-100 transition-colors"
+            title="查看会话日志"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+            </svg>
+          </button>
+          <button
             onClick={toggleAgentPanel}
             className={`p-1.5 rounded-lg transition-colors ${
               isAgentPanelOpen ? 'bg-indigo-100 text-indigo-600' : 'text-gray-400 hover:bg-gray-100'
@@ -468,6 +479,14 @@ export const ChatPanel: React.FC = () => {
         summaryEnabled={summaryEnabled}
         summaryOpen={isSummaryOpen}
         onToggleSummary={() => setIsSummaryOpen((v) => !v)}
+      />
+
+      {/* 日志面板 */}
+      <LogPanel
+        isOpen={isLogOpen}
+        onClose={() => setIsLogOpen(false)}
+        sessionId={currentSessionId || ''}
+        sessionTitle={currentSession?.title || ''}
       />
     </div>
   )
