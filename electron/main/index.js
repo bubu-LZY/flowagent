@@ -156,7 +156,7 @@ if (!isDev) {
     try {
       await shell.openExternal(url)
       return { success: true }
-    } catch (e: any) {
+    } catch (e) {
       return { success: false, error: e.message }
     }
   })
