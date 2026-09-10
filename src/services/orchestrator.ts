@@ -1182,39 +1182,8 @@ let fullContent = ''
           return // 等待用户，直接结束，不再调度
         }
 
-        // 3.2 检测 PM 宣布任务完成（DISPATCH: done / none / end）
-        const dispatchLine = fullContent.split(/\r?\n/).find((l) => /^\s*DISPATCH\s*:/i.test(l.trim()))
-        const dispatchBody = dispatchLine?.replace(/^\s*DISPATCH\s*:/i, '').trim().toLowerCase()
-        const isDispatchDone = dispatchBody === 'done' || dispatchBody === 'end' || dispatchBody === 'stop'
-        const isDispatchNone = dispatchBody === 'none'
-
-        if (isDispatchDone && agent.isCoordinator) {
-          console.log(`[orchestrator] ${agent.name} 宣布任务完成（DISPATCH: done）`)
-          this.conversationDelivered = true
-          this.addSystemNoteUnique(
-            ops,
-            '✅ 任务已完成！如果您需要修改或有新需求，可以直接输入消息继续。',
-            { avatar: '🎉', color: '#22c55e', taskCompletion: true }
-          )
-          this.triggerAutoSummary()
-          ops.setStreaming(agent.id, false)
-          return
-        }
-        if (isDispatchNone && agent.isCoordinator) {
-          console.log(`[orchestrator] ${agent.name} 表示无需调度（DISPATCH: none）`)
-          this.conversationDelivered = true
-          this.addSystemNoteUnique(
-            ops,
-            '💡 本轮讨论结束。如果您需要继续，可以直接输入新的需求。',
-            { avatar: 'ℹ️', color: '#3b82f6' }
-          )
-          this.triggerAutoSummary()
-          ops.setStreaming(agent.id, false)
-          return
-        }
-
-        // 3.3 【核心】代码状态机：根据当前角色自动决定下一步
-        // AI 的 DISPATCH 行只是参考，最终由代码拍板
+        // 3.2 【核心】代码状态机：根据当前角色自动决定下一步
+        // AI 的 DISPATCH 行只是参考，最终由代码拍板，杜绝 AI 写 DISPATCH: done/none 导致流程提前中断
         // 注意：先去掉 <think> 标签，只看实际输出内容
         const cleanContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '')
         const nextAction = this.determineNextAction(agent, cleanContent, allToolCalls.length, activeAgents)
@@ -1302,6 +1271,11 @@ let fullContent = ''
         if (nextAction.type === 'end' && agent.isCoordinator) {
           console.log(`[orchestrator] 流程结束：${nextAction.reason}`)
           this.conversationDelivered = true
+          this.addSystemNoteUnique(
+            ops,
+            '✅ 任务已完成！如果您需要修改或有新需求，可以直接输入消息继续。',
+            { avatar: '🎉', color: '#22c55e', taskCompletion: true }
+          )
           this.triggerAutoSummary()
         }
       }
