@@ -1562,8 +1562,8 @@ const McpSettings: React.FC = () => {
   const getMcpSkillDoc = () => {
     return `---
 name: flowchart-agent-mcp
-description: 通过 MCP 协议调用 Flowchart Agent，让 AI 助手可以直接操作流程图画布、管理会话、触发多智能体协作。
-version: 0.2.0
+description: 通过 MCP 协议调用 Flowchart Agent，让 AI 助手可以直接操作流程图画布、管理会话、触发多智能体协作。所有调用在后台独立会话中执行，不影响用户当前使用。
+version: 0.4.1
 author: Flowchart Agent Team
 triggers: [流程图, 画图, drawio, 流程设计, 架构图]
 ---
@@ -1573,6 +1573,11 @@ triggers: [流程图, 画图, drawio, 流程设计, 架构图]
 ## 概述
 
 通过 MCP（Model Context Protocol）协议，让外部 AI 助手可以直接调用 Flowchart Agent 的全部能力，包括流程图绘制、会话管理、智能体调度、经验沉淀等。
+
+**重要特性：**
+- 🎯 **后台执行**：所有 MCP 调用在独立的后台会话中执行，不会影响用户当前正在使用的界面
+- 📋 **任务记录**：每次调用都会记录到 MCP 任务面板，可随时查看历史任务和对应的画板产物
+- 🔒 **会话隔离**：每次调用默认创建新会话，也可通过 sessionId 指定在已有会话上继续操作
 
 ## 连接配置
 
@@ -1617,7 +1622,11 @@ triggers: [流程图, 画图, drawio, 流程设计, 架构图]
 | \`remove_cells\` | 删除节点/连线 |
 | \`analyze_diagram_quality\` | 分析流程图质量（重叠、交叉等） |
 | \`auto_layout_diagram\` | 自动布局（Sugiyama 层级布局算法） |
-| \`export_diagram\` | 导出为 PNG/SVG/PDF/XML 格式 |
+| \`export_diagram\` | 导出为 PNG/SVG/JPEG/XML/DrawIO 格式 |
+
+**所有画布工具通用参数：**
+- \`sessionId\` (string, 可选)：指定在哪个会话上操作，不传则自动创建新会话
+- \`taskName\` (string, 可选)：任务名称，用于在 MCP 任务面板中展示
 
 ### 会话管理（6个）
 
@@ -1675,11 +1684,30 @@ result = mcp.call_tool("draw_flowchart", {
     {"source": "fail", "target": "end"},
   ],
   "autoLayout": true,
-  "layoutDirection": "TB"
+  "layoutDirection": "TB",
+  "taskName": "登录流程图"  // 任务名，显示在 MCP 任务面板
 })
 \`\`\`
 
-### 示例 2：触发多智能体协作画图
+### 示例 2：在同一个会话中继续修改
+
+\`\`\`python
+# 第一次调用，创建会话
+result1 = mcp.call_tool("draw_flowchart", {
+  "nodes": [...],
+  "edges": [...],
+  "taskName": "电商下单流程"
+})
+session_id = result1["sessionId"]  // 获取会话 ID
+
+# 第二次调用，在同一会话上添加节点
+result2 = mcp.call_tool("add_nodes", {
+  "sessionId": session_id,  // 指定同一会话
+  "nodes": [{"id": "new_node", "label": "新节点", "shape": "rounded"}]
+})
+\`\`\`
+
+### 示例 3：触发多智能体协作画图
 
 \`\`\`python
 # 发送一条自然语言消息，让多智能体团队协作画图
@@ -1690,16 +1718,17 @@ result = mcp.call_tool("send_chat_message", {
 })
 \`\`\`
 
-### 示例 3：获取当前画布内容并做质量分析
+### 示例 4：获取当前画布内容并导出
 
 \`\`\`python
-# 先获取 XML
+# 获取画布 XML
 xml_result = mcp.call_tool("get_diagram_xml")
 
-# 再做质量分析
-quality_result = mcp.call_tool("analyze_diagram_quality")
-print(f"质量评分: {quality_result['score']}/10")
-print(f"问题数: {len(quality_result['issues'])}")
+# 导出为 PNG
+png_result = mcp.call_tool("export_diagram", {
+  "format": "png"
+})
+# png_result.dataUrl 是 base64 编码的 PNG 图片
 \`\`\`
 
 ## 参数详细说明
@@ -1724,7 +1753,8 @@ print(f"问题数: {len(quality_result['issues'])}")
 - \`autoLayout\` (boolean, 默认 true)：是否自动布局
 - \`layoutDirection\` (string, 默认 "TB")：TB=从上到下，LR=从左到右
 - \`clearFirst\` (boolean, 默认 true)：绘制前清空画布
-- \`sessionId\` (string, 可选)：会话 ID
+- \`sessionId\` (string, 可选)：会话 ID（不传则创建新会话）
+- \`taskName\` (string, 可选)：任务名称（显示在 MCP 任务面板）
 
 **返回：**
 - \`nodeCount\`：节点数量
@@ -1744,6 +1774,17 @@ print(f"问题数: {len(quality_result['issues'])}")
 - \`lastMessages\`：最后几条消息
 - \`elapsedSeconds\`：耗时（秒）
 
+### export_diagram
+
+**参数：**
+- \`format\` (string, 必填)：导出格式，支持 png / svg / jpeg / xml / drawio
+- \`sessionId\` (string, 可选)：会话 ID
+- \`taskName\` (string, 可选)：任务名称
+
+**返回：**
+- PNG/SVG/JPEG 格式：\`dataUrl\` (base64 data URL)
+- XML/DrawIO 格式：\`xml\` (XML 字符串)
+
 ## 注意事项
 
 1. **必须启动 Flowchart Agent**：MCP 服务随程序一起启动，程序关闭则 MCP 服务不可用
@@ -1752,8 +1793,10 @@ print(f"问题数: {len(quality_result['issues'])}")
 4. **速率限制**：每分钟最多 60 次请求，防止滥用
 5. **画布操作异步**：画图操作可能需要几秒时间，请耐心等待
 6. **会话隔离**：不同会话的画布和聊天记录是隔离的
-7. **自动保存**：所有画布操作会自动保存到当前会话
-8. **Token 重置**：如果怀疑 Token 泄露，立即在设置中重新生成
+7. **后台执行**：MCP 调用在后台独立会话中执行，不会干扰用户当前正在进行的工作
+8. **任务面板**：在 Flowchart Agent 顶部点击「MCP 任务」按钮可查看所有历史调用和对应的画板产物
+9. **自动保存**：所有画布操作会自动保存到当前会话
+10. **Token 重置**：如果怀疑 Token 泄露，立即在设置中重新生成
 
 ## 安全机制
 
@@ -1763,6 +1806,8 @@ print(f"问题数: {len(quality_result['issues'])}")
 - ✅ CORS 限制（仅 localhost）
 - ✅ 请求日志审计（最近 100 条）
 - ✅ 一键重置 Token
+- ✅ IP 黑名单（5 次认证失败或 10 次速率超限拉黑 24 小时）
+- ✅ 支持永久拉黑 IP
 
 ## 故障排查
 
@@ -1779,6 +1824,10 @@ print(f"问题数: {len(quality_result['issues'])}")
 **问题：Token 无效**
 - 在设置中重新生成 Token
 - 更新客户端配置中的 Token
+
+**问题：画布操作返回权限错误**
+- 确保使用的是 v0.4.1 及以上版本
+- 旧版本可能存在 MCP 工具权限校验问题，请升级到最新版
 `
   }
 

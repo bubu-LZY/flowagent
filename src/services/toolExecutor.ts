@@ -322,6 +322,9 @@ const DIAGRAM_TOOLS = [
   'draw_flowchart',
   'clear_diagram',
   'analyze_diagram_image',
+  'auto_layout_diagram',
+  'validate_diagram_quality',
+  'export_diagram',
 ]
 
 // 工具执行超时时间（毫秒）：30秒无响应则超时
@@ -385,23 +388,27 @@ async function executeToolInternal(
     }
 
     // 权限校验：检查该 agent 是否有权限使用此工具
-    const agentTools = useToolStore.getState().getAgentTools(agentId)
-    const hasPermission = agentTools.some((t) => t.name === toolName)
-    
-    if (!hasPermission) {
-      // 检查是否是画布工具，给出更具体的提示
-      const isDiagramTool = DIAGRAM_TOOLS.includes(toolName)
-      if (isDiagramTool) {
+    // MCP 系统调用（mcp-system）绕过权限校验，直接执行所有工具
+    const isMcpSystem = agentId === 'mcp-system'
+    if (!isMcpSystem) {
+      const agentTools = useToolStore.getState().getAgentTools(agentId)
+      const hasPermission = agentTools.some((t) => t.name === toolName)
+      
+      if (!hasPermission) {
+        // 检查是否是画布工具，给出更具体的提示
+        const isDiagramTool = DIAGRAM_TOOLS.includes(toolName)
+        if (isDiagramTool) {
+          return {
+            success: false,
+            error: `工具不存在：${toolName}`,
+            message: `你没有权限使用 ${toolName} 工具。画布操作请 @执行代理 来完成。你没有任何画布操作工具，所有与流程图相关的操作都必须通过 @执行代理 来执行。`,
+          }
+        }
         return {
           success: false,
           error: `工具不存在：${toolName}`,
-          message: `你没有权限使用 ${toolName} 工具。画布操作请 @执行代理 来完成。你没有任何画布操作工具，所有与流程图相关的操作都必须通过 @执行代理 来执行。`,
+          message: `你没有权限使用 ${toolName} 工具。请检查工具名称是否正确，或联系管理员确认你的工具权限。`,
         }
-      }
-      return {
-        success: false,
-        error: `工具不存在：${toolName}`,
-        message: `你没有权限使用 ${toolName} 工具。请检查工具名称是否正确，或联系管理员确认你的工具权限。`,
       }
     }
 
@@ -519,6 +526,8 @@ async function executeBuiltinTool(
       return executeAnalyzeImage(args, agentId)
     case 'analyze_diagram_image':
       return executeAnalyzeDiagramImage(args, agentId)
+    case 'export_diagram':
+      return executeExportDiagram(args)
     case 'execute_code':
       return executeCode(args)
     case 'save_experience':
@@ -2092,6 +2101,56 @@ async function executeAnalyzeImage(
       message: `图片分析失败：${e.message || '未知错误'}`,
       mode: 'error',
       error: e.message || 'unknown',
+    }
+  }
+}
+
+async function executeExportDiagram(args: Record<string, any>) {
+  const win = window as any
+  if (!win.drawioApi) {
+    return { success: false, message: 'draw.io 画布未初始化', error: 'canvas_not_ready' }
+  }
+  if (!win.drawioApi.isLoaded) {
+    return { success: false, message: 'draw.io 画布正在加载中，请稍后再试', error: 'canvas_not_ready' }
+  }
+
+  const format = (args.format || 'png').toLowerCase()
+
+  try {
+    switch (format) {
+      case 'xml':
+      case 'drawio': {
+        const xml = await win.drawioApi.getXml()
+        return {
+          success: true,
+          format,
+          xml,
+        }
+      }
+      case 'png':
+      case 'svg':
+      case 'jpeg':
+      case 'jpg': {
+        const exportFormat = format === 'jpg' ? 'jpeg' : format
+        const dataUrl = await win.drawioApi.exportImage(exportFormat)
+        return {
+          success: true,
+          format: exportFormat,
+          dataUrl,
+        }
+      }
+      default:
+        return {
+          success: false,
+          error: 'unsupported_format',
+          message: `不支持的导出格式: ${format}（支持 png/svg/jpeg/xml/drawio）`,
+        }
+    }
+  } catch (error: any) {
+    return {
+      success: false,
+      error: 'export_failed',
+      message: `导出失败: ${error.message}`,
     }
   }
 }

@@ -1,7 +1,15 @@
-## v0.4.1 - 2026-09-10
+## v0.4.1 - 2026-09-11
 
 ### 🐛 Bug 修复
-- 修复调度再次卡住：移除 PM 的 DISPATCH: done/none 提前终止逻辑，代码状态机完全接管流程推进，杜绝 AI 自作主张结束流程
+- 修复调度再次卡住：移除 PM 的 DISPATCH: done/none 提前终止逻辑，代码状态机完全接管流程推进
+- 修复 MCP 画布工具调用无权限：MCP 系统调用（mcp-system）绕过智能体权限校验，直接执行所有工具
+- 修复 MCP export_diagram 工具缺失：新增内部 export_diagram 工具，支持 png/svg/jpeg/xml/drawio 导出
+- 修复 MCP 调用参数污染：剥离 sessionId/taskName 等 MCP 层参数后再传给内部工具
+
+### ✨ 优化
+- MCP 画布工具全部统一走 runCanvasTask → executeTool 流程，确保行为一致
+- MCP Skill 文档更新：新增后台执行、任务面板、taskName 参数、IP 黑名单等说明
+- 所有画布工具新增 taskName 参数，用于 MCP 任务面板展示
 
 ## v0.4.0 - 2026-09-10
 

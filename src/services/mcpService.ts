@@ -70,7 +70,7 @@ export function registerMcpHandlers() {
   registerHandler('mcp:remove_cells', (args) => runCanvasTask('remove_cells', args))
   registerHandler('mcp:analyze_diagram_quality', (args) => runCanvasTask('validate_diagram_quality', args))
   registerHandler('mcp:auto_layout_diagram', (args) => runCanvasTask('auto_layout_diagram', args))
-  registerHandler('mcp:export_diagram', handleExportDiagram)
+  registerHandler('mcp:export_diagram', (args) => runCanvasTask('export_diagram', args))
 
   // ===== 会话管理 =====
   registerHandler('mcp:list_sessions', handleListSessions)
@@ -110,16 +110,17 @@ async function runCanvasTask(toolName: string, args: any): Promise<any> {
   const originalSessionId = sessionStore.currentSessionId
   const taskId = generateId()
 
+  // 从 args 中提取 MCP 层参数，剩余的作为工具参数传给 executeTool
+  const { sessionId, taskName, ...toolArgs } = args || {}
+
   // 确定目标会话 ID
-  let targetSessionId = args?.sessionId
-  let isNewSession = false
+  let targetSessionId = sessionId
 
   if (!targetSessionId) {
     // 没有指定会话，创建一个新的 MCP 任务会话
-    const title = args?.taskName || `MCP ${toolName} ${new Date().toLocaleTimeString()}`
+    const title = taskName || `MCP ${toolName} ${new Date().toLocaleTimeString()}`
     const newSession = sessionStore.createSession(title)
     targetSessionId = newSession.id
-    isNewSession = true
   }
 
   // 记录任务
@@ -141,8 +142,8 @@ async function runCanvasTask(toolName: string, args: any): Promise<any> {
       await waitForCanvasReady(5000)
     }
 
-    // 执行工具（用 mcp-system 作为虚拟 agentId）
-    const result = await executeTool(toolName, args || {}, 'mcp-system')
+    // 执行工具（用 mcp-system 作为虚拟 agentId，绕过智能体权限校验）
+    const result = await executeTool(toolName, toolArgs, 'mcp-system')
 
     // 获取执行后的画布 XML 快照
     let diagramXml: string | undefined
@@ -201,32 +202,6 @@ function waitForCanvasReady(timeoutMs: number = 3000): Promise<void> {
     }
     check()
   })
-}
-
-// ========== 导出流程图 ==========
-async function handleExportDiagram(args: any) {
-  const { format = 'png' } = args
-  const win = window as any
-  
-  if (!win.drawioApi?.isLoaded) {
-    throw new Error('画布尚未就绪')
-  }
-
-  let result: any
-  switch (format.toLowerCase()) {
-    case 'xml':
-    case 'drawio':
-      result = { xml: await win.drawioApi.getXml() }
-      break
-    case 'png':
-    case 'svg':
-      result = await win.drawioApi.exportImage(format)
-      break
-    default:
-      throw new Error(`不支持的导出格式: ${format}（支持 png/svg/xml/drawio）`)
-  }
-  
-  return { success: true, format, ...result }
 }
 
 // ===== 会话管理 =====
