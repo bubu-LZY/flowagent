@@ -4,6 +4,7 @@ import { useSummaryStore } from '@/store/summaryStore'
 import { useSessionStore } from '@/store/sessionStore'
 import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay, parseMentions } from '@/utils/helpers'
 import { callAI } from './aiService'
+import { addLog } from './logService'
 
 // ============ 系统消息去重（防"任务完成"刷屏） ============
 // 一次会话内，系统提示如果和最近 8 条 fingerprint 重复，就不重复插；
@@ -300,6 +301,43 @@ class MultiAgentOrchestrator {
   }
 
   // 计算当前 AI 消息数量
+  // 【代码兜底】PM 没写 DISPATCH 行时，自动推断下一个该调度的角色
+  // 原则：严格串行推进，按 设计 → 执行 → 评审 标准流程
+  // 根据当前消息中已出现的角色和画布状态来推断
+  private inferNextAgent(activeAgents: any[], pmContent: string): any | null {
+    const messages = useChatStore.getState().messages
+    const designer = activeAgents.find((a) => a.id === 'designer')
+    const executor = activeAgents.find((a) => a.id === 'executor')
+    const reviewer = activeAgents.find((a) => a.id === 'reviewer')
+
+    // 检查各角色是否已经发过言
+    const hasDesignerReplied = messages.some((m) => m.agentId === 'designer')
+    const hasExecutorReplied = messages.some((m) => m.agentId === 'executor')
+    const hasReviewerReplied = messages.some((m) => m.agentId === 'reviewer')
+    const executorDidRealWork = messages.some(
+      (m) => m.agentId === 'executor' && m.toolCalls && m.toolCalls.length > 0
+    )
+
+    // 策略 1：设计助手还没发言 → 先调度设计助手
+    if (designer && !hasDesignerReplied) {
+      return designer
+    }
+
+    // 策略 2：设计助手说了，但执行代理还没干活 → 调度执行代理
+    if (executor && hasDesignerReplied && !executorDidRealWork) {
+      return executor
+    }
+
+    // 策略 3：执行代理干过活，但评审员还没发言 → 调度评审员
+    if (reviewer && executorDidRealWork && !hasReviewerReplied) {
+      return reviewer
+    }
+
+    // 策略 4：评审员也说了，回到项目经理拍板
+    // （PM 自己就是当前 agent，不调度自己，返回 null）
+    return null
+  }
+
   private getAIMessageCount(messages: ChatMessage[]): number {
     return messages.filter(m => m.role === 'assistant' && m.agentId !== 'system').length
   }
@@ -349,6 +387,17 @@ class MultiAgentOrchestrator {
   private async processConversation(userMessage: ChatMessage, ops: ChatOperations) {
     // 【修复 P0-4】检测会话切换，重置会话级状态
     this.checkSessionSwitch()
+    const sessionId = useSessionStore.getState().currentSessionId || 'default'
+
+    // 记录用户消息日志
+    addLog(sessionId, 'message', '发送消息', {
+      agentId: 'user',
+      agentName: '用户',
+      agentAvatar: '👑',
+      agentColor: '#6366f1',
+      content: userMessage.content.slice(0, 500),
+      metadata: { messageLength: userMessage.content.length },
+    })
 
     // 会话级交付锁：一旦本次任务被 PM 拍板交付，禁止后续用户消息触发新一轮讨论，
     // 避免"任务完成 → 用户回个消息 → 又开始新讨论 → 又完成"循环
@@ -591,6 +640,17 @@ class MultiAgentOrchestrator {
       console.log(`[orchestrator] isStopped=true，跳过 ${agent.name} 调度`)
       return
     }
+
+    // 记录调度开始日志
+    const sessionId = useSessionStore.getState().currentSessionId || 'default'
+    addLog(sessionId, 'schedule', `开始调度 ${agent.name}`, {
+      agentId: agent.id,
+      agentName: agent.name,
+      agentAvatar: agent.avatar,
+      agentColor: agent.color,
+      content: `chainLevel: ${chainLevel}, isCoordinatorTurn: ${isCoordinatorTurn}, isExplicitlyMentioned: ${isExplicitlyMentioned}`,
+      metadata: { chainLevel, isCoordinatorTurn, isExplicitlyMentioned },
+    })
 
     // 保护3.2：总消息数上限保护（50条 AI 消息）
     const aiMessageCount = this.getAIMessageCount(contextMessages)
@@ -843,9 +903,18 @@ let fullContent = ''
       // 如果执行代理被明确 @ 了但一个工具都没调用，说明它在闲聊而不是干活，强制重试
       if (agent.id === 'executor' && isExplicitlyMentioned && allToolCalls.length === 0) {
         const noToolRetryCount = (this.executorNoToolRetries || 0)
-        if (noToolRetryCount < 1) {
+        if (noToolRetryCount < 2) {
           this.executorNoToolRetries = noToolRetryCount + 1
           console.log(`[orchestrator] 执行代理被 @ 了但没调用任何工具，自动重试（第 ${noToolRetryCount + 1} 次）`)
+
+          // 记录日志
+          addLog(sessionId, 'error', `执行代理未调用工具，自动重试（第 ${noToolRetryCount + 1} 次）`, {
+            agentId: 'executor',
+            agentName: '执行代理',
+            agentAvatar: '🔧',
+            agentColor: '#ec4899',
+            content: '执行代理被调度但未调用任何画布工具，系统强制重试',
+          })
           
           // 给一个系统提示消息，强制要求用工具
           const reminderMsg: ChatMessage = {
@@ -855,7 +924,20 @@ let fullContent = ''
             agentName: '系统',
             agentAvatar: '🔧',
             agentColor: '#ec4899',
-            content: '【系统强制提醒】执行代理必须立即调用画布工具完成操作！不允许只说话不干活、不允许询问确认、不允许等待他人回复。直接调用 draw_flowchart / add_nodes / update_nodes 等工具执行。',
+            content: `【系统强制提醒 · 第 ${noToolRetryCount + 1} 次】执行代理必须立即调用画布工具完成操作！
+
+⚠️ 绝对禁止：
+- 不允许只说话不干活
+- 不允许询问"确认要执行吗"
+- 不允许等待他人回复
+- 不允许输出"待执行操作"清单而不真正执行
+
+✅ 你必须立刻做的：
+1. 从上下文找到设计稿（NODES / EDGES 列表）或用户需求
+2. 直接调用 draw_flowchart(nodes, edges) 或其他画布工具
+3. 执行完再报告结果
+
+如果找不到设计稿，先调用 get_diagram_xml 读当前画布状态，然后直接画图！`,
             timestamp: Date.now(),
           }
           ops.addMessage(reminderMsg)
@@ -909,6 +991,20 @@ let fullContent = ''
         this.repliedAgentsInRound.add(agent.id)
       }
 
+      // 记录智能体回复完成日志
+      addLog(sessionId, 'message', success ? '回复完成' : '回复失败', {
+        agentId: agent.id,
+        agentName: agent.name,
+        agentAvatar: agent.avatar,
+        agentColor: agent.color,
+        content: fullContent.slice(0, 500),
+        metadata: {
+          success,
+          toolCalls: allToolCalls.length,
+          contentLength: fullContent.length,
+        },
+      })
+
       // 铁律3：AI 调度 - 解析 PM/任意智能体回复里 @ 的下一位继续派活
       // 优先 DISPATCH 行（强制格式），回退到 @-mention 模糊匹配
       // 仅当本轮正常完成（success=true）才触发链式；失败交给 handleAgentFailure 兜底
@@ -932,12 +1028,27 @@ let fullContent = ''
           // 但如果 agent 是 PM 且回复中同时 @了用户和其他智能体，应该只等待用户，不调度其他人
         }
 
-        // 【重要修复】调度来源严格区分：
-        // - 项目经理（coordinator）：DISPATCH 行优先，没有的话回退到 @-mention（PM 说 @谁就是调度谁）
-        // - 其他智能体：只认 DISPATCH: 行，闲聊里的 @xxx 不算调度（防止"你觉得怎么样"式的 @ 触发无限循环）
+        // 【重要修复】调度来源严格区分 + 代码兜底
+        // - 项目经理（coordinator）：DISPATCH 行优先；没有 DISPATCH 行时，代码自动推断下一个角色（不回退到全 @ 模式，防止 PM 闲聊式 @ 导致并行混乱）
+        // - 其他智能体：只认 DISPATCH: 行，闲聊里的 @xxx 不算调度
         let dispatchTags: string[]
+        const hasDispatchLine = /^\s*DISPATCH\s*:/m.test(fullContent)
         if (agent.isCoordinator) {
-          dispatchTags = extractDispatchTags(fullContent)
+          if (hasDispatchLine) {
+            dispatchTags = extractDispatchTags(fullContent)
+          } else {
+            // 【代码兜底】PM 没写 DISPATCH 行，根据上下文自动推断下一个该谁
+            // 原则：严格串行，一次只调度一个人，按 设计 → 执行 → 评审 顺序推进
+            console.log(`[orchestrator] PM 未写 DISPATCH 行，代码自动推断下一个角色`)
+            const inferred = this.inferNextAgent(activeAgents, fullContent)
+            dispatchTags = inferred ? [inferred.name] : []
+            // 给用户一个系统提示，说明 PM 没按格式来，代码自动兜底了
+            if (inferred) {
+              addLog(sessionId, 'system', `PM 未写 DISPATCH 行，代码兜底调度 ${inferred.name}`, {
+                content: `PM 回复中未检测到 DISPATCH 行，系统根据流程状态自动推断下一个角色为 ${inferred.name}`,
+              })
+            }
+          }
         } else {
           // 非 PM：只解析 DISPATCH: 行，不回退到 @-mention
           const dispatchLine = fullContent.split(/\r?\n/).find((l) => /^\s*DISPATCH\s*:/i.test(l.trim()))
@@ -975,6 +1086,68 @@ let fullContent = ''
           this.triggerAutoSummary()
         }
 
+        // 【代码兜底】设计助手要调度执行代理，但输出中没有 NODES/EDGES 格式的设计稿
+        // → 拦截调度，让设计助手重新输出规范格式，不让执行代理接一个空任务
+        if (agent.id === 'designer' && dispatchTags.some((t) => {
+          const n = t.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
+          return n === '执行代理' || n === 'executor'
+        })) {
+          const hasNodesSection = /NODES|节点清单|node.*list/i.test(fullContent)
+          const hasEdgesSection = /EDGES|连线清单|edge.*list/i.test(fullContent)
+          if (!hasNodesSection || !hasEdgesSection) {
+            console.log(`[orchestrator] 设计助手要调度执行代理但没有输出规范设计稿（NODES/EDGES），拦截并要求重写`)
+            addLog(sessionId, 'error', '设计助手未输出规范设计稿，拦截调度', {
+              agentId: 'designer',
+              agentName: '设计助手',
+              agentAvatar: '🎨',
+              agentColor: '#8b5cf6',
+              content: `设计助手要调度执行代理，但回复中没有 NODES 和 EDGES 格式的设计稿。hasNodes: ${hasNodesSection}, hasEdges: ${hasEdgesSection}`,
+            })
+
+            // 插入系统提示，要求设计助手重新输出
+            const reminderMsg: ChatMessage = {
+              id: generateId(),
+              role: 'assistant',
+              agentId: 'system',
+              agentName: '系统',
+              agentAvatar: '🎨',
+              agentColor: '#8b5cf6',
+              content: `【系统强制要求】设计助手必须输出规范格式的设计稿才能调度执行代理！
+
+请严格按照以下格式输出，缺一不可：
+
+\`\`\`
+NODES
+id | label | shape | color
+...
+
+EDGES
+from -> to | label（可选）
+...
+
+DISPATCH: @执行代理
+\`\`\`
+
+- NODES 部分：列出所有节点，包含 id / label / shape / color
+- EDGES 部分：列出所有连线，from -> to 格式
+- 最后一行必须是 DISPATCH: @执行代理
+
+请重新输出完整的设计稿。`,
+              timestamp: Date.now(),
+            }
+            ops.addMessage(reminderMsg)
+
+            // 让设计助手可以重新发言
+            this.repliedAgentsInRound.delete(agent.id)
+
+            // 重新调度设计助手
+            const { messages: retryMessages } = useChatStore.getState()
+            await delay(400)
+            await this.generateAgentResponse(agent, retryMessages, ops, false, true, chainLevel, activeAgents)
+            return
+          }
+        }
+
         const norm = (x: string) => x.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
         const seen = new Set<string>()
         const queue: string[] = []
@@ -993,6 +1166,15 @@ let fullContent = ''
         }
         if (queue.length > 0) {
           console.log(`[orchestrator] ${agent.name} -> 调度链: ${queue.join(', ')}`)
+          // 记录分发日志
+          addLog(sessionId, 'dispatch', `DISPATCH: ${queue.join(', ')}`, {
+            agentId: agent.id,
+            agentName: agent.name,
+            agentAvatar: agent.avatar,
+            agentColor: agent.color,
+            content: `从 ${agent.name} 调度到: ${queue.join(', ')}`,
+            metadata: { from: agent.id, to: queue, dispatchTags },
+          })
           const sortedIds = sortAgentsByPriority(queue)
           for (const nextId of sortedIds) {
             if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) break
