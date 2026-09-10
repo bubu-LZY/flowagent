@@ -176,6 +176,8 @@ class MultiAgentOrchestrator {
   private failureCounts: Map<string, number> = new Map()
   // 执行代理"光说不练"重试计数（每轮重置）
   private executorNoToolRetries = 0
+  // 设计助手输出不合格重试计数（每轮重置）
+  private designerRetryCount = 0
 
   // 【修复 P0-4】会话级状态（之前是模块级全局变量，导致跨会话污染）
   // "任务交付已完成" 会话级锁：一旦 PM 拍板交付，置 true，之后任何新用户输入
@@ -196,6 +198,7 @@ class MultiAgentOrchestrator {
       this.repliedAgentsInRound.clear()
       this.failureCounts.clear()
       this.executorNoToolRetries = 0
+      this.designerRetryCount = 0
       this.lastSessionId = currentSessionId
     }
   }
@@ -301,16 +304,21 @@ class MultiAgentOrchestrator {
   }
 
   // 计算当前 AI 消息数量
-  // 【代码兜底】PM 没写 DISPATCH 行时，自动推断下一个该调度的角色
-  // 原则：严格串行推进，按 设计 → 执行 → 评审 标准流程
-  // 根据当前消息中已出现的角色和画布状态来推断
-  private inferNextAgent(activeAgents: any[], pmContent: string): any | null {
+  // 【核心】代码状态机：根据当前角色 + 输出质量 + 对话状态，决定下一步动作
+  // 返回值：
+  // - { type: 'retry', reason, reminder } → 当前智能体输出不合格，让它重写
+  // - { type: 'dispatch', agentId, reason } → 调度下一个智能体
+  // - { type: 'end', reason } → 流程结束
+  // - { type: 'none', reason } → 暂不调度（等用户输入）
+  private determineNextAction(
+    agent: any,
+    content: string,
+    toolCallCount: number,
+    activeAgents: any[]
+  ): { type: 'retry' | 'dispatch' | 'end' | 'none'; reason: string; agentId?: string; reminder?: string } {
     const messages = useChatStore.getState().messages
-    const designer = activeAgents.find((a) => a.id === 'designer')
-    const executor = activeAgents.find((a) => a.id === 'executor')
-    const reviewer = activeAgents.find((a) => a.id === 'reviewer')
 
-    // 检查各角色是否已经发过言
+    // 检查各角色是否已经发言过
     const hasDesignerReplied = messages.some((m) => m.agentId === 'designer')
     const hasExecutorReplied = messages.some((m) => m.agentId === 'executor')
     const hasReviewerReplied = messages.some((m) => m.agentId === 'reviewer')
@@ -318,24 +326,163 @@ class MultiAgentOrchestrator {
       (m) => m.agentId === 'executor' && m.toolCalls && m.toolCalls.length > 0
     )
 
-    // 策略 1：设计助手还没发言 → 先调度设计助手
-    if (designer && !hasDesignerReplied) {
-      return designer
+    // ============= 项目经理 =============
+    if (agent.isCoordinator) {
+      // PM 完成后，按标准流程推下一个：设计 → 执行 → 评审
+      // 如果设计助手还没发言 → 调度设计助手
+      const designer = activeAgents.find((a) => a.id === 'designer')
+      const executor = activeAgents.find((a) => a.id === 'executor')
+      const reviewer = activeAgents.find((a) => a.id === 'reviewer')
+
+      if (designer && !hasDesignerReplied) {
+        return { type: 'dispatch', agentId: 'designer', reason: 'PM 后第一步：设计助手出设计稿' }
+      }
+      if (executor && hasDesignerReplied && !executorDidRealWork) {
+        return { type: 'dispatch', agentId: 'executor', reason: '设计完成后：执行代理画图' }
+      }
+      if (reviewer && executorDidRealWork && !hasReviewerReplied) {
+        return { type: 'dispatch', agentId: 'reviewer', reason: '画图完成后：评审员验收' }
+      }
+      // 都走完了 → 结束（PM 自己拍板交付）
+      return { type: 'end', reason: '全流程走完，PM 拍板交付' }
     }
 
-    // 策略 2：设计助手说了，但执行代理还没干活 → 调度执行代理
-    if (executor && hasDesignerReplied && !executorDidRealWork) {
-      return executor
+    // ============= 设计助手 =============
+    if (agent.id === 'designer') {
+      // 检查是否输出了规范格式的设计稿
+      const hasNodesSection = /NODES|节点清单|node.*list|节点列表/i.test(content)
+      const hasEdgesSection = /EDGES|连线清单|edge.*list|连线列表/i.test(content)
+      const hasDesignContent = hasNodesSection && hasEdgesSection
+
+      // 设计稿质量不合格 → 重试
+      if (!hasDesignContent) {
+        // 限制重试次数，防止死循环（最多 2 次）
+        const retryCount = (this.designerRetryCount || 0)
+        if (retryCount < 2) {
+          this.designerRetryCount = retryCount + 1
+          return {
+            type: 'retry',
+            reason: `设计助手未输出规范设计稿（NODES+EDGES），重试第 ${retryCount + 1} 次`,
+            reminder: `【系统强制要求 · 第 ${retryCount + 1} 次】设计助手必须输出规范格式的设计稿！
+
+当前检测到你的回复只是文字描述，没有 NODES 和 EDGES 格式的结构化设计稿。请严格按照以下格式输出：
+
+\`\`\`
+NODES
+id | label | shape | color
+start | 开始 | ellipse | #22c55e
+process1 | 处理步骤1 | rounded | #3b82f6
+decision1 | 判断条件 | diamond | #eab308
+end | 结束 | ellipse | #ef4444
+
+EDGES
+start -> process1
+process1 -> decision1
+decision1 -> end | 是
+decision1 -> process1 | 否
+\`\`\`
+
+要求：
+1. NODES 部分：列出所有节点，每行一个，格式：id | 标签 | 形状 | 颜色
+2. EDGES 部分：列出所有连线，格式：from -> to | 标签（标签可选）
+3. 形状：开始/结束用 ellipse，处理用 rounded，判断用 diamond
+4. 颜色用十六进制，如 #3b82f6
+
+请直接输出设计稿，不要解释、不要闲聊、不要问别人意见。`,
+          }
+        }
+        // 重试 2 次还不行，跳过设计，直接让执行代理画
+        console.log(`[orchestrator] 设计助手重试 ${retryCount} 次仍不合格，跳过设计直接调度执行代理`)
+        const executor = activeAgents.find((a) => a.id === 'executor')
+        if (executor) {
+          return { type: 'dispatch', agentId: 'executor', reason: '设计助手多次不合格，跳过设计直接画图' }
+        }
+        return { type: 'none', reason: '设计助手失败且无执行代理可用' }
+      }
+
+      // 设计稿合格 → 调度执行代理
+      const executor = activeAgents.find((a) => a.id === 'executor')
+      if (executor) {
+        return { type: 'dispatch', agentId: 'executor', reason: '设计稿完成，调度执行代理画图' }
+      }
+      return { type: 'none', reason: '无执行代理可用' }
     }
 
-    // 策略 3：执行代理干过活，但评审员还没发言 → 调度评审员
-    if (reviewer && executorDidRealWork && !hasReviewerReplied) {
-      return reviewer
+    // ============= 执行代理 =============
+    if (agent.id === 'executor') {
+      // 执行代理已经在上面的"光说不练"检测里处理了重试逻辑
+      // 到这里说明它成功回复了（success=true）
+      // 如果调用了工具 → 调度评审员验收
+      if (toolCallCount > 0) {
+        const reviewer = activeAgents.find((a) => a.id === 'reviewer')
+        if (reviewer) {
+          return { type: 'dispatch', agentId: 'reviewer', reason: '画图完成，调度评审员验收' }
+        }
+        // 没有评审员 → 回到 PM
+        const pm = activeAgents.find((a) => a.isCoordinator)
+        if (pm) {
+          return { type: 'dispatch', agentId: pm.id, reason: '画图完成，无评审员，回到 PM' }
+        }
+        return { type: 'end', reason: '画图完成，无后续角色' }
+      }
+      // 没调用工具但 success=true（理论上不会到这里，上面已经重试了）
+      return { type: 'none', reason: '执行代理未调用工具' }
     }
 
-    // 策略 4：评审员也说了，回到项目经理拍板
-    // （PM 自己就是当前 agent，不调度自己，返回 null）
-    return null
+    // ============= 评审员 =============
+    if (agent.id === 'reviewer') {
+      // 检查评审结果是 PASS 还是 FAIL
+      const isPass = /VERDICT:\s*PASS|评审通过|验收通过/i.test(content)
+      const isFail = /VERDICT:\s*FAIL|评审不通过|验收失败/i.test(content)
+
+      if (isPass) {
+        // 通过 → 回到 PM 拍板交付
+        const pm = activeAgents.find((a) => a.isCoordinator)
+        if (pm) {
+          return { type: 'dispatch', agentId: pm.id, reason: '评审通过，回到 PM 交付' }
+        }
+        return { type: 'end', reason: '评审通过，流程结束' }
+      }
+
+      if (isFail) {
+        // 失败 → 看失败原因决定调度谁
+        // 如果是布局/坐标问题 → 调度执行代理修改
+        // 如果是设计问题 → 调度设计助手
+        const isDesignIssue = /设计|需求|流程|结构|缺少节点/i.test(content)
+        if (isDesignIssue) {
+          const designer = activeAgents.find((a) => a.id === 'designer')
+          if (designer) {
+            return { type: 'dispatch', agentId: 'designer', reason: '评审不通过（设计问题），回到设计助手' }
+          }
+        }
+        // 默认调度执行代理修改
+        const executor = activeAgents.find((a) => a.id === 'executor')
+        if (executor) {
+          return { type: 'dispatch', agentId: 'executor', reason: '评审不通过，调度执行代理修改' }
+        }
+        return { type: 'none', reason: '评审失败但无执行代理可用' }
+      }
+
+      // 没明确写 PASS/FAIL → 回到 PM，让 PM 拍板
+      const pm = activeAgents.find((a) => a.isCoordinator)
+      if (pm) {
+        return { type: 'dispatch', agentId: pm.id, reason: '评审完成，回到 PM 汇总' }
+      }
+      return { type: 'end', reason: '评审完成，无 PM 可调度' }
+    }
+
+    // ============= 小白 =============
+    if (agent.id === 'newbie') {
+      // 小白反馈完 → 回到 PM
+      const pm = activeAgents.find((a) => a.isCoordinator)
+      if (pm) {
+        return { type: 'dispatch', agentId: pm.id, reason: '小白反馈完成，回到 PM' }
+      }
+      return { type: 'none', reason: '无 PM 可调度' }
+    }
+
+    // 其他未知角色 → 不调度
+    return { type: 'none', reason: `未知角色 ${agent.id}，不自动调度` }
   }
 
   private getAIMessageCount(messages: ChatMessage[]): number {
@@ -445,6 +592,7 @@ class MultiAgentOrchestrator {
       this.repliedAgentsInRound.clear()
       this.failureCounts.clear()
       this.executorNoToolRetries = 0
+      this.designerRetryCount = 0
     } else {
       // 轮数只用来限制"讨论"，不该用来卡死"执行"：
       // 用户在等待后回复（通常是追加指令/催进度），如果任务还没完成（画布为空），
@@ -1005,65 +1153,33 @@ let fullContent = ''
         },
       })
 
-      // 铁律3：AI 调度 - 解析 PM/任意智能体回复里 @ 的下一位继续派活
-      // 优先 DISPATCH 行（强制格式），回退到 @-mention 模糊匹配
-      // 仅当本轮正常完成（success=true）才触发链式；失败交给 handleAgentFailure 兜底
+      // 铁律3：代码状态机接管调度流程（AI 的 DISPATCH 行只是建议，代码有最终决定权）
+      // 设计原则：每个角色完成后，代码根据角色身份 + 输出质量 + 当前状态，自动决定下一步
+      // 完全不依赖 AI 自觉写 DISPATCH 行，从机制上保证流程不会断
       if (success && !useChatStore.getState().waitingForUser && !useChatStore.getState().isStopped) {
-        // 【修复】检测是否 @了用户，如果是则设置 waitingForUser 并停止后续调度
-        // 之前 waitingForUser 永远不会被设置为 true，导致 PM @用户后调度不停止
+        // 3.1 检测是否 @了用户 → 暂停调度等待用户回复
         const mentionedNames = parseMentions(fullContent)
         const mentionsUser = mentionedNames.some((name) => {
           const n = name.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
           return n === 'user' || n === '用户'
         })
-        if (mentionsUser) {
-          console.log(`[orchestrator] ${agent.name} @了用户，设置 waitingForUser=true，暂停调度等待用户回复`)
+        if (mentionsUser && agent.isCoordinator) {
+          console.log(`[orchestrator] ${agent.name} @了用户，设置 waitingForUser=true，暂停调度`)
           useChatStore.getState().setWaitingForUser(true)
           this.addSystemNoteUnique(
             ops,
             '⏸️ 智能体正在等待您的回复。您可以直接输入消息继续讨论。',
             { avatar: '💬', color: '#3b82f6' }
           )
-          // 注意：这里不 return，而是继续往下走（下面的调度循环会检查 waitingForUser 并 break）
-          // 但如果 agent 是 PM 且回复中同时 @了用户和其他智能体，应该只等待用户，不调度其他人
+          ops.setStreaming(agent.id, false)
+          return // 等待用户，直接结束，不再调度
         }
 
-        // 【重要修复】调度来源严格区分 + 代码兜底
-        // - 项目经理（coordinator）：DISPATCH 行优先；没有 DISPATCH 行时，代码自动推断下一个角色（不回退到全 @ 模式，防止 PM 闲聊式 @ 导致并行混乱）
-        // - 其他智能体：只认 DISPATCH: 行，闲聊里的 @xxx 不算调度
-        let dispatchTags: string[]
-        const hasDispatchLine = /^\s*DISPATCH\s*:/m.test(fullContent)
-        if (agent.isCoordinator) {
-          if (hasDispatchLine) {
-            dispatchTags = extractDispatchTags(fullContent)
-          } else {
-            // 【代码兜底】PM 没写 DISPATCH 行，根据上下文自动推断下一个该谁
-            // 原则：严格串行，一次只调度一个人，按 设计 → 执行 → 评审 顺序推进
-            console.log(`[orchestrator] PM 未写 DISPATCH 行，代码自动推断下一个角色`)
-            const inferred = this.inferNextAgent(activeAgents, fullContent)
-            dispatchTags = inferred ? [inferred.name] : []
-            // 给用户一个系统提示，说明 PM 没按格式来，代码自动兜底了
-            if (inferred) {
-              addLog(sessionId, 'system', `PM 未写 DISPATCH 行，代码兜底调度 ${inferred.name}`, {
-                content: `PM 回复中未检测到 DISPATCH 行，系统根据流程状态自动推断下一个角色为 ${inferred.name}`,
-              })
-            }
-          }
-        } else {
-          // 非 PM：只解析 DISPATCH: 行，不回退到 @-mention
-          const dispatchLine = fullContent.split(/\r?\n/).find((l) => /^\s*DISPATCH\s*:/i.test(l.trim()))
-          if (dispatchLine) {
-            dispatchTags = extractDispatchTags(fullContent)
-          } else {
-            dispatchTags = []
-          }
-        }
-
-        // 【修复 P1-1】检测 DISPATCH: done / end，标记任务完成并给用户明确提示
-        // 之前 dispatchTags 为空时什么都不做，用户不知道任务完成了
+        // 3.2 检测 PM 宣布任务完成（DISPATCH: done / none / end）
         const dispatchLine = fullContent.split(/\r?\n/).find((l) => /^\s*DISPATCH\s*:/i.test(l.trim()))
         const dispatchBody = dispatchLine?.replace(/^\s*DISPATCH\s*:/i, '').trim().toLowerCase()
         const isDispatchDone = dispatchBody === 'done' || dispatchBody === 'end' || dispatchBody === 'stop'
+        const isDispatchNone = dispatchBody === 'none'
 
         if (isDispatchDone && agent.isCoordinator) {
           console.log(`[orchestrator] ${agent.name} 宣布任务完成（DISPATCH: done）`)
@@ -1074,9 +1190,11 @@ let fullContent = ''
             { avatar: '🎉', color: '#22c55e', taskCompletion: true }
           )
           this.triggerAutoSummary()
-        } else if (dispatchBody === 'none' && agent.isCoordinator) {
+          ops.setStreaming(agent.id, false)
+          return
+        }
+        if (isDispatchNone && agent.isCoordinator) {
           console.log(`[orchestrator] ${agent.name} 表示无需调度（DISPATCH: none）`)
-          // DISPATCH: none 表示 PM 认为不需要其他人参与，任务到此为止
           this.conversationDelivered = true
           this.addSystemNoteUnique(
             ops,
@@ -1084,112 +1202,102 @@ let fullContent = ''
             { avatar: 'ℹ️', color: '#3b82f6' }
           )
           this.triggerAutoSummary()
+          ops.setStreaming(agent.id, false)
+          return
         }
 
-        // 【代码兜底】设计助手要调度执行代理，但输出中没有 NODES/EDGES 格式的设计稿
-        // → 拦截调度，让设计助手重新输出规范格式，不让执行代理接一个空任务
-        if (agent.id === 'designer' && dispatchTags.some((t) => {
-          const n = t.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
-          return n === '执行代理' || n === 'executor'
-        })) {
-          const hasNodesSection = /NODES|节点清单|node.*list/i.test(fullContent)
-          const hasEdgesSection = /EDGES|连线清单|edge.*list/i.test(fullContent)
-          if (!hasNodesSection || !hasEdgesSection) {
-            console.log(`[orchestrator] 设计助手要调度执行代理但没有输出规范设计稿（NODES/EDGES），拦截并要求重写`)
-            addLog(sessionId, 'error', '设计助手未输出规范设计稿，拦截调度', {
-              agentId: 'designer',
-              agentName: '设计助手',
-              agentAvatar: '🎨',
-              agentColor: '#8b5cf6',
-              content: `设计助手要调度执行代理，但回复中没有 NODES 和 EDGES 格式的设计稿。hasNodes: ${hasNodesSection}, hasEdges: ${hasEdgesSection}`,
-            })
+        // 3.3 【核心】代码状态机：根据当前角色自动决定下一步
+        // AI 的 DISPATCH 行只是参考，最终由代码拍板
+        const nextAction = this.determineNextAction(agent, fullContent, allToolCalls.length, activeAgents)
 
-            // 插入系统提示，要求设计助手重新输出
-            const reminderMsg: ChatMessage = {
-              id: generateId(),
-              role: 'assistant',
-              agentId: 'system',
-              agentName: '系统',
-              agentAvatar: '🎨',
-              agentColor: '#8b5cf6',
-              content: `【系统强制要求】设计助手必须输出规范格式的设计稿才能调度执行代理！
-
-请严格按照以下格式输出，缺一不可：
-
-\`\`\`
-NODES
-id | label | shape | color
-...
-
-EDGES
-from -> to | label（可选）
-...
-
-DISPATCH: @执行代理
-\`\`\`
-
-- NODES 部分：列出所有节点，包含 id / label / shape / color
-- EDGES 部分：列出所有连线，from -> to 格式
-- 最后一行必须是 DISPATCH: @执行代理
-
-请重新输出完整的设计稿。`,
-              timestamp: Date.now(),
-            }
-            ops.addMessage(reminderMsg)
-
-            // 让设计助手可以重新发言
-            this.repliedAgentsInRound.delete(agent.id)
-
-            // 重新调度设计助手
-            const { messages: retryMessages } = useChatStore.getState()
-            await delay(400)
-            await this.generateAgentResponse(agent, retryMessages, ops, false, true, chainLevel, activeAgents)
-            return
-          }
-        }
-
-        const norm = (x: string) => x.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
-        const seen = new Set<string>()
-        const queue: string[] = []
-        for (const tag of dispatchTags) {
-          const nTag = norm(tag)
-          if (!nTag) continue
-          const a = activeAgents.find(
-            (x) => norm(x.name) === nTag || norm(x.id) === nTag
-          ) ?? activeAgents.find(
-            (x) => norm(x.name).includes(nTag) || nTag.includes(norm(x.name))
-          )
-          if (a && a.id !== agent.id && !seen.has(a.id)) {
-            seen.add(a.id)
-            queue.push(a.id)
-          }
-        }
-        if (queue.length > 0) {
-          console.log(`[orchestrator] ${agent.name} -> 调度链: ${queue.join(', ')}`)
-          // 记录分发日志
-          addLog(sessionId, 'dispatch', `DISPATCH: ${queue.join(', ')}`, {
+        if (nextAction.type === 'retry') {
+          // 当前智能体输出不合格，让它重写
+          console.log(`[orchestrator] ${agent.name} 输出不合格（${nextAction.reason}），强制重试`)
+          addLog(sessionId, 'system', `${agent.name} 输出不合格，强制重试`, {
             agentId: agent.id,
             agentName: agent.name,
             agentAvatar: agent.avatar,
             agentColor: agent.color,
-            content: `从 ${agent.name} 调度到: ${queue.join(', ')}`,
-            metadata: { from: agent.id, to: queue, dispatchTags },
+            content: nextAction.reason,
           })
-          const sortedIds = sortAgentsByPriority(queue)
-          for (const nextId of sortedIds) {
-            if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) break
-            const next = activeAgents.find((x) => x.id === nextId)
-            if (!next) continue
-            await delay(400 + Math.random() * 400)
-            if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) break
-            // 【修复】链式调度时重新获取最新消息列表，确保下一个智能体能看到上一个的回复
-            // 之前传 contextMessages（旧的），导致下一个智能体上下文断裂
-            const { messages: latestMessages } = useChatStore.getState()
-            // 【修复】chainLevel 正确递增，让深度限制真正生效
-            await this.generateAgentResponse(next, latestMessages, ops, !!next.isCoordinator, true, chainLevel + 1, activeAgents)
+
+          // 插入系统提示
+          const reminderMsg: ChatMessage = {
+            id: generateId(),
+            role: 'assistant',
+            agentId: 'system',
+            agentName: '系统',
+            agentAvatar: '⚠️',
+            agentColor: '#f59e0b',
+            content: nextAction.reminder || nextAction.reason,
+            timestamp: Date.now(),
           }
+          ops.addMessage(reminderMsg)
+
+          // 让它可以重新发言
+          this.repliedAgentsInRound.delete(agent.id)
+
+          // 重试
+          const { messages: retryMessages } = useChatStore.getState()
+          await delay(400)
+          await this.generateAgentResponse(agent, retryMessages, ops, false, true, chainLevel, activeAgents)
+          return
+        }
+
+        if (nextAction.type === 'dispatch') {
+          // 调度下一个智能体
+          const nextAgent = activeAgents.find((a) => a.id === nextAction.agentId)
+          if (!nextAgent) {
+            console.log(`[orchestrator] 要调度 ${nextAction.agentId} 但不在活跃列表中，跳过`)
+            ops.setStreaming(agent.id, false)
+            return
+          }
+
+          console.log(`[orchestrator] ${agent.name} → ${nextAgent.name}（${nextAction.reason}）`)
+          addLog(sessionId, 'dispatch', `DISPATCH: ${nextAgent.name}`, {
+            agentId: agent.id,
+            agentName: agent.name,
+            agentAvatar: agent.avatar,
+            agentColor: agent.color,
+            content: `从 ${agent.name} 调度到 ${nextAgent.name}（${nextAction.reason}）`,
+            metadata: { from: agent.id, to: nextAgent.id, reason: nextAction.reason },
+          })
+
+          if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) {
+            ops.setStreaming(agent.id, false)
+            return
+          }
+
+          await delay(400 + Math.random() * 400)
+
+          if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) {
+            ops.setStreaming(agent.id, false)
+            return
+          }
+
+          const { messages: latestMessages } = useChatStore.getState()
+          await this.generateAgentResponse(
+            nextAgent,
+            latestMessages,
+            ops,
+            !!nextAgent.isCoordinator,
+            true,
+            chainLevel + 1,
+            activeAgents
+          )
+          ops.setStreaming(agent.id, false)
+          return
+        }
+
+        // nextAction.type === 'end' 或 'none' → 流程结束或暂不调度
+        if (nextAction.type === 'end' && agent.isCoordinator) {
+          console.log(`[orchestrator] 流程结束：${nextAction.reason}`)
+          this.conversationDelivered = true
+          this.triggerAutoSummary()
         }
       }
+
+      // 【修复】正常完成后也要清除 streaming 状态
 
       // 【修复】正常完成后也要清除 streaming 状态
       // 之前只有 catch 里才 setStreaming(false)，导致成功完成的 agent 一直留在"当前作业人"里叠加
