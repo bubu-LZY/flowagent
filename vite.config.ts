@@ -20,11 +20,15 @@ function electronCopyPlugin() {
       fs.mkdirSync(destPreload, { recursive: true })
       fs.mkdirSync(destAssets, { recursive: true })
       
-      // 复制主进程文件
-      fs.copyFileSync(
-        path.join(__dirname, 'electron/main/index.js'),
-        path.join(destMain, 'index.cjs')
-      )
+      // 复制主进程文件（main 目录下所有 .js 文件）
+      const mainSrc = path.join(__dirname, 'electron/main')
+      const mainFiles = fs.readdirSync(mainSrc).filter(f => f.endsWith('.js'))
+      for (const file of mainFiles) {
+        fs.copyFileSync(
+          path.join(mainSrc, file),
+          path.join(destMain, file.replace('.js', '.cjs'))
+        )
+      }
       
       // 复制 preload 文件
       fs.copyFileSync(
