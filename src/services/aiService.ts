@@ -62,6 +62,8 @@ interface CallAIParams {
 
 // 最大工具调用递归深度，防止无限循环
 const MAX_TOOL_CALL_DEPTH = 10
+// 单次 AI 调用总超时（毫秒）：包括所有工具调用递归，终极兜底防止完全卡死
+const TOTAL_CALL_TIMEOUT_MS = 15 * 60 * 1000
 
 // 最大连续空回复次数，超过则强制结束（防止 AI 卡住不说话也不调用工具）
 const MAX_CONSECUTIVE_EMPTY_RESPONSES = 2
@@ -277,7 +279,10 @@ function buildTools(agentId: string): OpenAI.Chat.ChatCompletionTool[] {
 }
 
 // 流式响应超时时间（毫秒）：60秒没有新 token 则认为卡住
+// 注意：这是"两次数据的间隔"，不是总时长。只要一直有数据输出就不会超时
 const STREAM_TIMEOUT_MS = 60 * 1000
+// 初始连接超时时间（毫秒）：创建 API 连接的最大等待时间
+const CONNECTION_TIMEOUT_MS = 60 * 1000
 
 // 主调用函数
 export async function callAI(params: CallAIParams): Promise<string> {
@@ -315,6 +320,15 @@ export async function callAI(params: CallAIParams): Promise<string> {
   // 之前只设 streamAborted 标记，如果流真的卡住了，循环永远等不到下一次迭代来检测
   const controller = new AbortController()
 
+  // 总超时：终极兜底，15分钟后无论如何都中断，防止极端情况完全卡死
+  // （depth=0 时启动总超时，递归调用不重置，保证整个调用链不超过15分钟）
+  let totalTimeoutId: ReturnType<typeof setTimeout> | null = null
+  if (depth === 0) {
+    totalTimeoutId = setTimeout(() => {
+      controller.abort(new Error(`总超时（${TOTAL_CALL_TIMEOUT_MS / 60000}分钟未完成）`))
+    }, TOTAL_CALL_TIMEOUT_MS)
+  }
+
   try {
     const tools = buildTools(agentId)
     const openaiMessages = buildMessages(systemPrompt, messages, agentId)
@@ -329,19 +343,31 @@ export async function callAI(params: CallAIParams): Promise<string> {
       : (modelMaxTokens && modelMaxTokens > 0)
         ? modelMaxTokens
         : 4096
-    const stream = await client.chat.completions.create(
-      {
-        model: modelConfig.model,
-        messages: openaiMessages,
-        stream: true,
-        max_tokens: maxTokens,
-        tools: tools.length > 0 ? tools : undefined,
-        tool_choice: tools.length > 0 ? 'auto' : undefined,
-      },
-      {
-        signal: controller.signal, // 【修复 P2-5】传入 AbortSignal，支持真·中断
-      }
-    )
+
+    // 连接超时保护：初始 API 调用如果30秒内没建立连接，直接超时
+    // 之前的流式超时只在流创建后才生效，如果 create() 本身卡住就永远等下去
+    const connectTimeoutId = setTimeout(() => {
+      controller.abort(new Error(`连接超时（${CONNECTION_TIMEOUT_MS / 1000}秒内未建立连接）`))
+    }, CONNECTION_TIMEOUT_MS)
+
+    let stream: any
+    try {
+      stream = await client.chat.completions.create(
+        {
+          model: modelConfig.model,
+          messages: openaiMessages,
+          stream: true,
+          max_tokens: maxTokens,
+          tools: tools.length > 0 ? tools : undefined,
+          tool_choice: tools.length > 0 ? 'auto' : undefined,
+        },
+        {
+          signal: controller.signal,
+        }
+      )
+    } finally {
+      clearTimeout(connectTimeoutId)
+    }
 
     let fullContent = ''
     let fullReasoning = ''
@@ -642,6 +668,12 @@ export async function callAI(params: CallAIParams): Promise<string> {
       timeoutTimer = null
     }
     throw new Error(`AI 调用失败: ${error.message || '未知错误'}`)
+  } finally {
+    // 清除总超时定时器
+    if (totalTimeoutId) {
+      clearTimeout(totalTimeoutId)
+      totalTimeoutId = null
+    }
   }
 }
 
