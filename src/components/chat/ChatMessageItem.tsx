@@ -346,8 +346,8 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
             )
           },
           table: ({ children }) => (
-            <div className="overflow-x-auto my-3">
-              <table className="min-w-full border-collapse border border-gray-300 text-sm">
+            <div className="my-3 max-w-full overflow-x-auto overscroll-x-contain rounded border border-gray-200">
+              <table className="w-max min-w-full border-collapse border border-gray-300 text-sm">
                 {children}
               </table>
             </div>

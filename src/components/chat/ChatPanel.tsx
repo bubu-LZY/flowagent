@@ -32,6 +32,8 @@ export const ChatPanel: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [isAtBottom, setIsAtBottom] = useState(true)
+  // 是否有新消息到达但用户没在底部（用于显示"跳到最新"按钮）
+  const [hasNewBelow, setHasNewBelow] = useState(false)
   // 记录上一轮的轮数，用于检测轮次变化
   const prevRoundRef = useRef(discussionRound)
 
@@ -77,22 +79,29 @@ export const ChatPanel: React.FC = () => {
     if (!container) return
 
     const handleScroll = () => {
-      setIsAtBottom(checkIsAtBottom())
+      const atBottom = checkIsAtBottom()
+      setIsAtBottom(atBottom)
+      if (atBottom) setHasNewBelow(false)
     }
 
     container.addEventListener('scroll', handleScroll)
     return () => container.removeEventListener('scroll', handleScroll)
   }, [checkIsAtBottom])
 
-  // 新消息到来时自动滚动（只有用户在底部时才滚动）
+  // 新消息到来时：用户在底部 → 自动滚动到底部；不在底部 → 标记"有新消息"，浮按钮显示
+  // 关键：依赖 messages.length 而非 messages —— 流式 token 追加（不新增消息条目）不触发滚动判断
+  // 否则每来一个 token 都会重置 hasNewBelow，导致"展开消息"时容器被持续顶下去
   useEffect(() => {
     if (isAtBottom) {
       // 使用 requestAnimationFrame 确保 DOM 已更新
       requestAnimationFrame(() => {
         scrollToBottom(true)
+        setHasNewBelow(false)
       })
+    } else {
+      setHasNewBelow(true)
     }
-  }, [messages, isAtBottom, scrollToBottom])
+  }, [messages.length, isAtBottom, scrollToBottom])
 
   // 重新生成 / 仅画图快捷操作
   useEffect(() => {
@@ -348,7 +357,7 @@ export const ChatPanel: React.FC = () => {
         {/* 消息列表 */}
         <div
           ref={containerRef}
-          className="flex-1 overflow-y-auto px-4 py-4"
+          className="flex-1 overflow-y-auto px-4 py-4 relative"
         >
           {messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center text-gray-400">
@@ -385,6 +394,26 @@ export const ChatPanel: React.FC = () => {
             })
           )}
           <div ref={messagesEndRef} />
+
+          {/* 跳到最新按钮：用户手动向上滚动（isAtBottom=false）且有新消息时显示 */}
+          {!isAtBottom && (
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
+              <button
+                onClick={() => {
+                  requestAnimationFrame(() => {
+                    scrollToBottom(true)
+                    setHasNewBelow(false)
+                  })
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-white rounded-full shadow-lg hover:bg-primary-hover transition-colors"
+              >
+                <span>↓ 跳到最新</span>
+                {hasNewBelow && (
+                  <span className="ml-1 px-1.5 rounded-full bg-red-500 text-[10px]">新</span>
+                )}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* 智能体列表面板 */}
