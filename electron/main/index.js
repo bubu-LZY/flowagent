@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const mcpServer = require('./mcp-server')
 
 // 计算正确的路径
 // 打包后 asar 内的结构：
@@ -20,12 +21,30 @@ process.env.VITE_PUBLIC = process.env.VITE_DEV_SERVER_URL
   ? path.join(distPath, '../public')
   : path.join(distPath, '../public')
 
+// 【安全加固】生产环境下阻止任何调试器附加（包括外部工具）
+// 防止用户通过 --inspect 等方式打开 DevTools 查看后台日志
+const isDev = !!process.env.VITE_DEV_SERVER_URL
+if (!isDev) {
+  app.on('web-contents-created', (_, contents) => {
+    contents.on('will-attach-debugger', (event) => {
+      event.preventDefault()
+    })
+    // 禁用右键菜单中的"检查"（防止通过右键打开 DevTools）
+    contents.on('context-menu', (event) => {
+      // 只阻止默认的检查菜单，不影响正常右键（如输入框的复制粘贴）
+      // draw.io 自己的右键菜单由 iframe 内部处理，不触发这里
+      event.preventDefault()
+    })
+  })
+}
+
 // 正常 GUI 模式（本机对外 MCP stdio 服务已移除）
 {
   let mainWindow = null
   let tray = null
 
   function createWindow() {
+    const isDev = !!process.env.VITE_DEV_SERVER_URL
     mainWindow = new BrowserWindow({
       width: 1400,
       height: 900,
@@ -40,6 +59,8 @@ process.env.VITE_PUBLIC = process.env.VITE_DEV_SERVER_URL
         webSecurity: false, // 允许加载 draw.io iframe
         backgroundThrottling: false, // 切到后台后画布也不掉帧
         spellcheck: false,
+        // 【安全加固】生产环境禁用 DevTools，防止用户查看后台系统日志
+        devTools: isDev,
       },
     })
 
@@ -127,8 +148,22 @@ process.env.VITE_PUBLIC = process.env.VITE_DEV_SERVER_URL
     return app.getVersion()
   })
 
+  // 用系统默认浏览器打开外部链接
+  ipcMain.handle('app:open-external', async (_, url) => {
+    if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+      return { success: false, error: '无效的 URL' }
+    }
+    try {
+      await shell.openExternal(url)
+      return { success: true }
+    } catch (e: any) {
+      return { success: false, error: e.message }
+    }
+  })
+
   // 弹出独立窗口加载画布（用 process 级别的会话，避免和主窗口共享被一起拖崩）
   ipcMain.handle('canvas:open-window', async () => {
+    const isDev = !!process.env.VITE_DEV_SERVER_URL
     const canvasWindow = new BrowserWindow({
       width: 1400,
       height: 900,
@@ -142,6 +177,8 @@ process.env.VITE_PUBLIC = process.env.VITE_DEV_SERVER_URL
         contextIsolation: true,
         webSecurity: false,
         backgroundThrottling: false,
+        // 【安全加固】生产环境禁用 DevTools
+        devTools: isDev,
       },
     })
     canvasWindow.removeMenu()
@@ -151,7 +188,16 @@ process.env.VITE_PUBLIC = process.env.VITE_DEV_SERVER_URL
       const canvasPath = path.join(distPath, 'index.html')
       await canvasWindow.loadFile(canvasPath, { query: { canvas: '1' } })
     }
-    canvasWindow.on('closed', () => {})
+    canvasWindow.on('closed', () => {
+      // 通知主窗口：画布窗口已关闭，主窗口可以恢复 iframe
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('canvas:window-closed')
+      }
+    })
+    // 通知主窗口：画布窗口已打开，主窗口可以卸载 iframe 释放内存
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('canvas:window-opened')
+    }
     return { success: true }
   })
 
@@ -802,6 +848,78 @@ updatedAt: ${now}
   app.whenReady().then(() => {
     createWindow()
     createTray()
+
+    // 设置 MCP 服务的主窗口引用
+    mcpServer.setMainWindow(mainWindow)
+
+    // 启动 MCP 服务
+    try {
+      // 设置 IPC 调用函数：MCP 工具调用通过执行 JS 转发到渲染进程
+      mcpServer.setIpcInvoke(async (channel, args) => {
+        if (!mainWindow) {
+          throw new Error('Main window not available')
+        }
+        const result = await mainWindow.webContents.executeJavaScript(`
+          (async () => {
+            if (!window.__mcpHandlers) return { error: 'MCP handlers not ready' }
+            const handler = window.__mcpHandlers['${channel}']
+            if (!handler) return { error: 'Unknown tool: ${channel}' }
+            try {
+              const r = await handler(${JSON.stringify(args || {})})
+              return { success: true, data: r }
+            } catch(e) {
+              return { error: e.message }
+            }
+          })()
+        `)
+        if (result && result.error) {
+          throw new Error(result.error)
+        }
+        return result?.data ?? result
+      })
+
+      const result = mcpServer.startServer()
+      console.log('[MCP] Server started on port', result.port)
+    } catch (e) {
+      console.error('[MCP] Failed to start server:', e)
+    }
+  })
+
+  // ========== MCP 控制 IPC ==========
+  ipcMain.handle('mcp:get-status', () => {
+    return mcpServer.getStatus()
+  })
+
+  ipcMain.handle('mcp:start', () => {
+    return mcpServer.startServer()
+  })
+
+  ipcMain.handle('mcp:stop', () => {
+    return mcpServer.stopServer()
+  })
+
+  ipcMain.handle('mcp:regenerate-token', () => {
+    const newToken = mcpServer.regenerateToken()
+    return { success: true, token: newToken }
+  })
+
+  ipcMain.handle('mcp:get-logs', (_, limit) => {
+    return mcpServer.getRecentLogs(limit || 50)
+  })
+
+  // IP 黑名单管理
+  ipcMain.handle('mcp:get-ban-list', () => {
+    return mcpServer.getBanList()
+  })
+
+  ipcMain.handle('mcp:unban-ip', (_, ip) => {
+    mcpServer.unbanIp(ip)
+    return { success: true }
+  })
+
+  ipcMain.handle('mcp:add-permanent-ban', (_, ip) => {
+    const result = mcpServer.addPermanentBan(ip)
+    return { success: result }
   })
 
   app.on('window-all-closed', () => {

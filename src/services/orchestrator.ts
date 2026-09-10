@@ -1,5 +1,6 @@
 import type { ChatMessage } from '@/types'
 import { useAgentStore, useModelStore, useChatStore, useVersionStore, useExperienceStore, useSkillStore, useUIStore, useToolStore } from '@/store'
+import { useSummaryStore } from '@/store/summaryStore'
 import { useSessionStore } from '@/store/sessionStore'
 import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay, parseMentions } from '@/utils/helpers'
 import { callAI } from './aiService'
@@ -47,16 +48,14 @@ const MAX_AI_MESSAGES = 50
 const MAX_CONSECUTIVE_SAME_AGENT = 4
 
 // 智能体调度优先级（数字越小优先级越高）
-// 设计 → 架构 → 评审 → 执行 → 文档 → 小白
-// 【修复 P2-4】key 统一为智能体 id（之前是 role，碰巧 id=role 才能工作）
+// 优先级：PM → 设计助手 → 评审员 → 执行代理 → 小白
+// 架构师和文档员已合并到设计助手和评审员中
 const AGENT_PRIORITY: Record<string, number> = {
-  'designer': 1,
-  'architect': 2,
-  'reviewer': 3,
-  'executor': 4,
-  'documenter': 5,
-  'newbie': 6,
   'project-manager': 0, // 项目经理优先级最高
+  'designer': 1,
+  'reviewer': 2,
+  'executor': 3,
+  'newbie': 4,
 }
 
 // 按优先级排序智能体 ID 列表
@@ -174,6 +173,8 @@ class MultiAgentOrchestrator {
   private repliedAgentsInRound: Set<string> = new Set()
   // 各智能体连续失败次数（失败兜底：第1次静默重试，第2次上报项目经理统筹）
   private failureCounts: Map<string, number> = new Map()
+  // 执行代理"光说不练"重试计数（每轮重置）
+  private executorNoToolRetries = 0
 
   // 【修复 P0-4】会话级状态（之前是模块级全局变量，导致跨会话污染）
   // "任务交付已完成" 会话级锁：一旦 PM 拍板交付，置 true，之后任何新用户输入
@@ -193,6 +194,7 @@ class MultiAgentOrchestrator {
       this.recentSystemFingerprints.clear()
       this.repliedAgentsInRound.clear()
       this.failureCounts.clear()
+      this.executorNoToolRetries = 0
       this.lastSessionId = currentSessionId
     }
   }
@@ -255,6 +257,34 @@ class MultiAgentOrchestrator {
     } catch (e) {
       console.warn('[orchestrator] 画布校验失败，按非空处理:', e)
       return false
+    }
+  }
+
+  /**
+   * 任务完成时自动生成画图总结（非阻塞）
+   * 只有开启了画图总结功能才会执行
+   */
+  private triggerAutoSummary(): void {
+    try {
+      const uiState = useUIStore.getState()
+      if (!uiState.summaryEnabled) return
+
+      const { messages } = useChatStore.getState()
+      const { currentSessionId: sessionId } = useSessionStore.getState()
+      if (!sessionId || messages.length < 3) return
+
+      // 异步生成，不阻塞主流程
+      ;(async () => {
+        try {
+          console.log('[orchestrator] 任务完成，自动生成画图总结...')
+          await useSummaryStore.getState().generateSummary(sessionId, messages)
+          console.log('[orchestrator] 画图总结自动生成完成')
+        } catch (e) {
+          console.warn('[orchestrator] 自动生成总结失败:', e)
+        }
+      })()
+    } catch (e) {
+      console.warn('[orchestrator] 触发自动总结异常:', e)
     }
   }
 
@@ -365,6 +395,7 @@ class MultiAgentOrchestrator {
       useChatStore.getState().incrementRound()
       this.repliedAgentsInRound.clear()
       this.failureCounts.clear()
+      this.executorNoToolRetries = 0
     } else {
       // 轮数只用来限制"讨论"，不该用来卡死"执行"：
       // 用户在等待后回复（通常是追加指令/催进度），如果任务还没完成（画布为空），
@@ -547,6 +578,14 @@ class MultiAgentOrchestrator {
     chainLevel: number = 0,
     activeAgents: any[] = []
   ) {
+    // 【关键修复】如果 activeAgents 为空（调用方没传），从 store 实时读取
+    // 之前所有初始调度调用都不传 activeAgents，导致 PM DISPATCH 时在空数组里找人，
+    // 谁也找不到，调度无声无息断掉 —— 这就是"没人工作"的根因
+    if (activeAgents.length === 0) {
+      const { agents, activeAgentIds } = useAgentStore.getState()
+      activeAgents = agents.filter((a) => activeAgentIds.includes(a.id))
+    }
+
     // 保护0：停止检查
     if (useChatStore.getState().isStopped) {
       console.log(`[orchestrator] isStopped=true，跳过 ${agent.name} 调度`)
@@ -800,6 +839,44 @@ let fullContent = ''
       this.failureCounts.delete(agent.id)
       success = true
 
+      // 【重要修复】执行代理"光说不练"检测 + 自动重试
+      // 如果执行代理被明确 @ 了但一个工具都没调用，说明它在闲聊而不是干活，强制重试
+      if (agent.id === 'executor' && isExplicitlyMentioned && allToolCalls.length === 0) {
+        const noToolRetryCount = (this.executorNoToolRetries || 0)
+        if (noToolRetryCount < 1) {
+          this.executorNoToolRetries = noToolRetryCount + 1
+          console.log(`[orchestrator] 执行代理被 @ 了但没调用任何工具，自动重试（第 ${noToolRetryCount + 1} 次）`)
+          
+          // 给一个系统提示消息，强制要求用工具
+          const reminderMsg: ChatMessage = {
+            id: generateId(),
+            role: 'assistant',
+            agentId: 'system',
+            agentName: '系统',
+            agentAvatar: '🔧',
+            agentColor: '#ec4899',
+            content: '【系统强制提醒】执行代理必须立即调用画布工具完成操作！不允许只说话不干活、不允许询问确认、不允许等待他人回复。直接调用 draw_flowchart / add_nodes / update_nodes 等工具执行。',
+            timestamp: Date.now(),
+          }
+          ops.addMessage(reminderMsg)
+          
+          // 从已回复集合中移除，让它可以重新发言
+          this.repliedAgentsInRound.delete(agent.id)
+          
+          // 重新获取最新消息并重试
+          const { messages: retryMessages } = useChatStore.getState()
+          await this.generateAgentResponse(agent, retryMessages, ops, false, true, chainLevel, activeAgents)
+          return // 重试的 generateAgentResponse 会走完完整流程，这里直接返回
+        } else {
+          console.warn(`[orchestrator] 执行代理重试 ${noToolRetryCount} 次后仍未调用工具，放弃`)
+          this.addSystemNoteUnique(
+            ops,
+            '⚠️ 执行代理未能执行绘图操作。您可以直接 @执行代理 并给出更明确的指令。',
+            { avatar: '⚠️', color: '#f59e0b' }
+          )
+        }
+      }
+
       // 画布校验：执行代理声称"完成/画好"但画布仍为空 → 系统警告（不直接重画，避免淹没）
       if (agent.id === 'executor') {
         try {
@@ -855,7 +932,21 @@ let fullContent = ''
           // 但如果 agent 是 PM 且回复中同时 @了用户和其他智能体，应该只等待用户，不调度其他人
         }
 
-        const dispatchTags = extractDispatchTags(fullContent)
+        // 【重要修复】调度来源严格区分：
+        // - 项目经理（coordinator）：DISPATCH 行优先，没有的话回退到 @-mention（PM 说 @谁就是调度谁）
+        // - 其他智能体：只认 DISPATCH: 行，闲聊里的 @xxx 不算调度（防止"你觉得怎么样"式的 @ 触发无限循环）
+        let dispatchTags: string[]
+        if (agent.isCoordinator) {
+          dispatchTags = extractDispatchTags(fullContent)
+        } else {
+          // 非 PM：只解析 DISPATCH: 行，不回退到 @-mention
+          const dispatchLine = fullContent.split(/\r?\n/).find((l) => /^\s*DISPATCH\s*:/i.test(l.trim()))
+          if (dispatchLine) {
+            dispatchTags = extractDispatchTags(fullContent)
+          } else {
+            dispatchTags = []
+          }
+        }
 
         // 【修复 P1-1】检测 DISPATCH: done / end，标记任务完成并给用户明确提示
         // 之前 dispatchTags 为空时什么都不做，用户不知道任务完成了
@@ -871,6 +962,7 @@ let fullContent = ''
             '✅ 任务已完成！如果您需要修改或有新需求，可以直接输入消息继续。',
             { avatar: '🎉', color: '#22c55e', taskCompletion: true }
           )
+          this.triggerAutoSummary()
         } else if (dispatchBody === 'none' && agent.isCoordinator) {
           console.log(`[orchestrator] ${agent.name} 表示无需调度（DISPATCH: none）`)
           // DISPATCH: none 表示 PM 认为不需要其他人参与，任务到此为止
@@ -880,6 +972,7 @@ let fullContent = ''
             '💡 本轮讨论结束。如果您需要继续，可以直接输入新的需求。',
             { avatar: 'ℹ️', color: '#3b82f6' }
           )
+          this.triggerAutoSummary()
         }
 
         const norm = (x: string) => x.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
@@ -915,6 +1008,10 @@ let fullContent = ''
           }
         }
       }
+
+      // 【修复】正常完成后也要清除 streaming 状态
+      // 之前只有 catch 里才 setStreaming(false)，导致成功完成的 agent 一直留在"当前作业人"里叠加
+      ops.setStreaming(agent.id, false)
     } catch (error: any) {
       console.error(`[orchestrator] ${agent.name}（${agent.id}）回复失败:`, error)
       if (!agent.isCoordinator) {

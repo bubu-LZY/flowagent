@@ -15,7 +15,7 @@ import { multiAgentOrchestrator } from '@/services/orchestrator'
 export const ChatPanel: React.FC = () => {
   const { messages, setMessages, addMessage, appendToMessage, appendThinkingToMessage, updateMessage, setStreaming, streamingAgents, discussionRound, maxRounds, waitingForUser, isStopped, stopAll, resetStopped } = useChatStore()
   const { getActiveAgents } = useAgentStore()
-  const { isAgentPanelOpen, toggleAgentPanel } = useUIStore()
+  const { isAgentPanelOpen, toggleAgentPanel, summaryEnabled } = useUIStore()
   const { 
     currentSessionId, 
     getCurrentSession, 
@@ -414,11 +414,10 @@ export const ChatPanel: React.FC = () => {
           )}
           <div ref={messagesEndRef} />
 
-          {/* 跳到最新按钮：用户手动向上滚动（isAtBottom=false）就显示（无论有没有新消息）
-              - 之前 v0.1.8 是 `!isAtBottom && hasNewBelow` 双重条件，导致用户只是看旧消息就看不到按钮
-              - 现在只判 `!isAtBottom` 即可，hasNewBelow 仅用于红点"新"徽标 */}
+          {/* 跳到最新按钮：sticky 粘在可视区底部，不随滚动移动
+               背景色醒目带阴影，有新消息时红点闪烁 */}
           {!isAtBottom && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
+            <div className="sticky bottom-2 flex justify-center z-20 -mt-4 mb-2">
               <button
                 onClick={() => {
                   // 1. 立即重开锁 → 之后流式持续锁底部
@@ -429,11 +428,14 @@ export const ChatPanel: React.FC = () => {
                     setHasNewBelow(false)
                   })
                 }}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs bg-primary text-white rounded-full shadow-lg hover:bg-primary-hover transition-colors"
+                className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-full shadow-xl hover:bg-indigo-700 active:bg-indigo-800 transition-all hover:scale-105 border border-indigo-400/30"
               >
-                <span>↓ 跳到最新</span>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                </svg>
+                <span>跳到最新</span>
                 {hasNewBelow && (
-                  <span className="ml-1 px-1.5 rounded-full bg-red-500 text-[10px]">新</span>
+                  <span className="ml-0.5 w-5 h-5 flex items-center justify-center rounded-full bg-red-500 text-[10px] font-bold animate-pulse">新</span>
                 )}
               </button>
             </div>
@@ -448,6 +450,13 @@ export const ChatPanel: React.FC = () => {
         )}
       </div>
 
+      {/* 画图总结面板（嵌入在输入框上方，可折叠） */}
+      {summaryEnabled && isSummaryOpen && (
+        <div className="border-t border-gray-200 bg-white">
+          <SummaryPanel isOpen={isSummaryOpen} onToggle={() => setIsSummaryOpen(false)} />
+        </div>
+      )}
+
       {/* 输入框 */}
       <ChatInput
         value={inputValue}
@@ -456,10 +465,10 @@ export const ChatPanel: React.FC = () => {
         placeholder="输入消息... 使用 @ 提及智能体"
         drawOnly={drawOnly}
         onToggleDrawOnly={() => setDrawOnly((v) => !v)}
+        summaryEnabled={summaryEnabled}
+        summaryOpen={isSummaryOpen}
+        onToggleSummary={() => setIsSummaryOpen((v) => !v)}
       />
-
-      {/* 会话总结面板 */}
-      <SummaryPanel isOpen={isSummaryOpen} onToggle={() => setIsSummaryOpen(!isSummaryOpen)} />
     </div>
   )
 }

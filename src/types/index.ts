@@ -24,6 +24,7 @@ export interface ToolDefinition {
   category?: string // 工具分类
   icon?: string // 工具图标
   zhName?: string // 工具中文名（UI 展示用）
+  zhDescription?: string // 工具中文描述（UI 展示用）
   // MCP 工具特有
   mcpServerId?: string
   // Skill 工具特有

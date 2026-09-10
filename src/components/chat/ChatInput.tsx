@@ -19,9 +19,12 @@ interface Props {
   placeholder?: string
   drawOnly?: boolean
   onToggleDrawOnly?: () => void
+  summaryEnabled?: boolean
+  summaryOpen?: boolean
+  onToggleSummary?: () => void
 }
 
-export const ChatInput: React.FC<Props> = ({ value, onChange, onSend, placeholder, drawOnly, onToggleDrawOnly }) => {
+export const ChatInput: React.FC<Props> = ({ value, onChange, onSend, placeholder, drawOnly, onToggleDrawOnly, summaryEnabled = true, summaryOpen = false, onToggleSummary }) => {
   const { agents } = useAgentStore()
   const { skills, addSkill } = useSkillStore()
   const currentSessionId = useChatStore((s) => s.currentConversation)
@@ -397,39 +400,59 @@ export const ChatInput: React.FC<Props> = ({ value, onChange, onSend, placeholde
             </svg>
           </button>
         </div>
-        {/* 底部按钮行：仅画图开关 + 文件导入，全部贴右侧，绝不被遮 */}
-        <div className="flex items-center justify-end gap-1 mt-1.5 px-2">
-          {/* 仅画图模式开关：开启后所有消息自动 @执行代理，跳过 PM/评审 */}
-          <button
-            onClick={onToggleDrawOnly}
-            className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors flex items-center gap-1 ${
-              drawOnly
-                ? 'bg-indigo-500 text-white border-indigo-500 hover:bg-indigo-600'
-                : 'bg-white text-gray-600 border-gray-200 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200'
-            }`}
-            title="开启后：所有消息直接交给执行代理画图，跳过 PM 派活/评审/讨论"
-          >
-            <span>🎨</span>
-            <span>仅画图 {drawOnly ? '已开' : ''}</span>
-          </button>
-          <label
-            className="p-1.5 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100 transition-colors cursor-pointer"
-            title="导入 Skill 文件（.zip / .md）"
-          >
-            <input
-              type="file"
-              accept=".zip,.md,.markdown"
-              className="hidden"
-              onChange={async (e) => {
-                const f = e.target.files?.[0]
-                if (f) await importSkillFromFile(f)
-                e.target.value = ''
-              }}
-            />
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6M5 12V7a2 2 0 012-2h10a2 2 0 012 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2v-5z" />
-            </svg>
-          </label>
+        {/* 底部按钮行：总结 + 仅画图开关 + 文件导入，全部贴右侧，绝不被遮 */}
+        <div className="flex items-center justify-between mt-1.5 px-2">
+          {/* 左侧：画图总结按钮（如果开启了总结功能） */}
+          <div className="flex items-center gap-1">
+            {summaryEnabled && (
+              <button
+                onClick={onToggleSummary}
+                className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors flex items-center gap-1 ${
+                  summaryOpen
+                    ? 'bg-blue-500 text-white border-blue-500 hover:bg-blue-600'
+                    : 'bg-white text-gray-600 border-gray-200 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-200'
+                }`}
+                title="查看当前会话的流程图总结"
+              >
+                <span>📋</span>
+                <span>画图总结</span>
+              </button>
+            )}
+          </div>
+          {/* 右侧：仅画图 + 文件导入 */}
+          <div className="flex items-center gap-1">
+            {/* 仅画图模式开关：开启后所有消息自动 @执行代理，跳过 PM/评审 */}
+            <button
+              onClick={onToggleDrawOnly}
+              className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors flex items-center gap-1 ${
+                drawOnly
+                  ? 'bg-indigo-500 text-white border-indigo-500 hover:bg-indigo-600'
+                  : 'bg-white text-gray-600 border-gray-200 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200'
+              }`}
+              title="开启后：所有消息直接交给执行代理画图，跳过 PM 派活/评审/讨论"
+            >
+              <span>🎨</span>
+              <span>仅画图 {drawOnly ? '已开' : ''}</span>
+            </button>
+            <label
+              className="p-1.5 text-gray-400 hover:text-gray-600 rounded hover:bg-gray-100 transition-colors cursor-pointer"
+              title="导入 Skill 文件（.zip / .md）"
+            >
+              <input
+                type="file"
+                accept=".zip,.md,.markdown"
+                className="hidden"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0]
+                  if (f) await importSkillFromFile(f)
+                  e.target.value = ''
+                }}
+              />
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 13h6m-3-3v6M5 12V7a2 2 0 012-2h10a2 2 0 012 2v10a2 2 0 01-2 2H7a2 2 0 01-2-2v-5z" />
+              </svg>
+            </label>
+          </div>
         </div>
       </div>
     </div>

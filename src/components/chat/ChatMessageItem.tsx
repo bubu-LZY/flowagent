@@ -373,7 +373,16 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
   }
 
   return (
-    <div className={`flex gap-3 mb-4 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
+    <div
+      className={`flex gap-3 mb-4 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
+      style={{
+        // content-visibility: auto 让浏览器跳过离屏消息的渲染
+        // 大幅减少长会话的渲染开销（离屏元素不做 layout/paint）
+        // contain-intrinsic-size 给浏览器一个预估高度，避免滚动条跳动
+        contentVisibility: 'auto',
+        containIntrinsicSize: 'auto 120px',
+      }}
+    >
       {/* 头像 */}
       <div
         className="w-9 h-9 rounded-full flex items-center justify-center text-lg flex-shrink-0 shadow-sm"
@@ -385,8 +394,8 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
         {isUser ? '👑' : message.agentAvatar || '🤖'}
       </div>
 
-      {/* 消息内容 */}
-      <div className={`max-w-[75%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
+      {/* 消息内容 - min-w-0 防止长文本撑破 flex 容器溢出到面板外 */}
+      <div className={`max-w-[75%] min-w-0 ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
         {/* 名称 */}
         {!isUser && (
           <div
@@ -397,9 +406,9 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
           </div>
         )}
 
-        {/* 气泡 */}
+        {/* 气泡 - break-words 确保长单词/代码也能正确换行不溢出 */}
         <div
-          className={`rounded-2xl px-4 py-3 ${
+          className={`rounded-2xl px-4 py-3 break-words overflow-hidden ${
             isUser
               ? 'bg-primary text-white rounded-tr-sm'
               : 'bg-white border border-gray-200 text-gray-800 rounded-tl-sm shadow-sm'

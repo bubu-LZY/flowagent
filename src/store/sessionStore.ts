@@ -21,6 +21,10 @@ interface SessionState {
   switchSession: (id: string) => void
   // 删除会话
   deleteSession: (id: string) => void
+  // 批量删除会话
+  deleteSessions: (ids: string[]) => void
+  // 清空所有会话（保留一个默认会话）
+  clearAllSessions: () => void
   // 更新当前会话标题
   updateCurrentTitle: (title: string) => void
   // 重命名指定会话
@@ -39,6 +43,8 @@ interface SessionState {
   getStoragePath: () => Promise<string | null>
   // 设置存储路径
   setStoragePath: (path: string) => Promise<boolean>
+  // 重置所有数据（清空所有会话、模型配置、工具设置等，恢复出厂状态）
+  resetAllData: () => void
 }
 
 export const useSessionStore = create<SessionState>()(
@@ -116,6 +122,70 @@ export const useSessionStore = create<SessionState>()(
           const api = getElectronAPI()
           api?.session?.delete?.(id)
         }
+      },
+
+      deleteSessions: (ids: string[]) => {
+        const { sessions, currentSessionId } = get()
+        const idSet = new Set(ids)
+        const newSessions = sessions.filter((s) => !idSet.has(s.id))
+        let newCurrentId = currentSessionId
+
+        if (currentSessionId && idSet.has(currentSessionId)) {
+          if (newSessions.length > 0) {
+            newCurrentId = newSessions[0].id
+          } else {
+            // 删除了所有会话，创建一个默认会话
+            const now = Date.now()
+            const defaultSession: ConversationSession = {
+              id: generateId(),
+              title: '默认会话',
+              createdAt: now,
+              updatedAt: now,
+              messages: [],
+              diagramXml: EMPTY_DIAGRAM_XML,
+              folderPath: '',
+              fileName: 'diagram.drawio',
+            }
+            newSessions.push(defaultSession)
+            newCurrentId = defaultSession.id
+          }
+        }
+
+        set({
+          sessions: newSessions,
+          currentSessionId: newCurrentId,
+        })
+
+        // Electron 环境下同步到磁盘
+        if (isElectron()) {
+          const api = getElectronAPI()
+          ids.forEach((id) => api?.session?.delete?.(id))
+        }
+      },
+
+      clearAllSessions: () => {
+        const now = Date.now()
+        const defaultSession: ConversationSession = {
+          id: generateId(),
+          title: '默认会话',
+          createdAt: now,
+          updatedAt: now,
+          messages: [],
+          diagramXml: EMPTY_DIAGRAM_XML,
+          folderPath: '',
+          fileName: 'diagram.drawio',
+        }
+
+        // Electron 环境下先删除所有磁盘会话
+        if (isElectron()) {
+          const api = getElectronAPI()
+          get().sessions.forEach((s) => api?.session?.delete?.(s.id))
+        }
+
+        set({
+          sessions: [defaultSession],
+          currentSessionId: defaultSession.id,
+        })
       },
 
       updateCurrentTitle: (title: string) => {
@@ -267,23 +337,85 @@ export const useSessionStore = create<SessionState>()(
           return false
         }
       },
+
+      resetAllData: () => {
+        // Electron 环境：删除磁盘上所有会话文件
+        if (isElectron()) {
+          const api = getElectronAPI()
+          get().sessions.forEach((s) => api?.session?.delete?.(s.id))
+        }
+
+        // 清空 localStorage 中所有 zustand persist 的数据
+        const keysToRemove: string[] = []
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i)
+          if (key && key.startsWith('flow-')) {
+            keysToRemove.push(key)
+          }
+        }
+        keysToRemove.forEach((k) => localStorage.removeItem(k))
+
+        // 重新初始化默认会话
+        const now = Date.now()
+        const defaultSession: ConversationSession = {
+          id: generateId(),
+          title: '默认会话',
+          createdAt: now,
+          updatedAt: now,
+          messages: [],
+          diagramXml: EMPTY_DIAGRAM_XML,
+          folderPath: '',
+          fileName: 'diagram.drawio',
+        }
+
+        set({
+          sessions: [defaultSession],
+          currentSessionId: defaultSession.id,
+          isLoadedFromDisk: false,
+        })
+
+        // 刷新页面让所有 store 重置
+        setTimeout(() => {
+          window.location.reload()
+        }, 300)
+      },
     }),
     {
       name: 'flow-agent-sessions',
       // 浏览器环境下使用 localStorage 持久化
-      // Electron 环境下优先使用文件系统，localStorage 作为备份
-      partialize: (state) => ({
-        sessions: state.sessions,
-        currentSessionId: state.currentSessionId,
-      }),
+      // Electron 环境下：localStorage 只存会话元数据索引（id/title/时间戳），
+      // 完整内容（messages/diagramXml）完全靠文件系统，彻底解决 5MB 上限问题
+      partialize: (state) => {
+        if (isElectron()) {
+          // Electron 环境：只存轻量元数据，大字段走文件系统
+          return {
+            sessions: state.sessions.map((s) => ({
+              id: s.id,
+              title: s.title,
+              createdAt: s.createdAt,
+              updatedAt: s.updatedAt,
+              folderPath: s.folderPath,
+              fileName: s.fileName,
+              // 不包含 messages 和 diagramXml！
+            })),
+            currentSessionId: state.currentSessionId,
+            isLoadedFromDisk: state.isLoadedFromDisk,
+          }
+        }
+        // 浏览器环境：全部存 localStorage
+        return {
+          sessions: state.sessions,
+          currentSessionId: state.currentSessionId,
+        }
+      },
       onRehydrateStorage: () => {
         return (state, error) => {
           if (error) {
             console.error('会话存储恢复失败:', error)
           }
-          // 恢复后，如果是 Electron 环境，从磁盘同步
           if (state && isElectron()) {
-            // 延迟执行，确保 store 已初始化
+            // Electron 环境：从磁盘加载完整会话内容（messages/diagramXml）
+            // localStorage 里只有元数据，内容必须从文件系统读
             setTimeout(() => {
               state.syncFromDisk()
             }, 100)

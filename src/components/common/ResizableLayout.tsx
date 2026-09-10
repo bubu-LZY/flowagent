@@ -7,14 +7,15 @@ interface ResizableLayoutProps {
   defaultLeftPercent?: number
 }
 
-const MIN_LEFT_WIDTH = 300
-const MIN_RIGHT_WIDTH = 280
+const MIN_LEFT_WIDTH = 380   // 聊天面板最小宽度（智能体列表打开后也能正常显示消息）
+const MIN_RIGHT_WIDTH = 420  // 画布最小宽度
+const DEFAULT_LEFT_PERCENT = 38  // 默认左侧（聊天）占比
 
 export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
   leftPanel,
   rightPanel,
   storageKey = 'resizable-layout',
-  defaultLeftPercent = 65,
+  defaultLeftPercent = DEFAULT_LEFT_PERCENT,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const [isResizing, setIsResizing] = useState(false)
@@ -77,6 +78,17 @@ export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
       }
     }
   }, [storageKey])
+
+  // 双击重置为默认比例
+  const handleDoubleClick = useCallback(() => {
+    leftPercentRef.current = defaultLeftPercent
+    setLeftPercent(defaultLeftPercent)
+    try {
+      localStorage.setItem(storageKey, defaultLeftPercent.toString())
+    } catch (e) {
+      // ignore
+    }
+  }, [storageKey, defaultLeftPercent])
 
   // 监听鼠标事件 - 只在组件挂载时绑定一次，用 ref 控制状态
   useEffect(() => {
@@ -144,6 +156,8 @@ export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
         }`}
         style={{ width: '4px' }}
         onMouseDown={handleMouseDown}
+        onDoubleClick={handleDoubleClick}
+        title="双击恢复默认比例"
       >
         <div
           className={`absolute inset-y-0 left-1/2 -translate-x-1/2 transition-all duration-150 ${

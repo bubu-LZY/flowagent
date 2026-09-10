@@ -8,6 +8,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '生成图片',
     name: 'generate_image',
     description: 'Generate an image from a text prompt.',
+    zhDescription: '根据文字描述生成图片，支持多种尺寸和风格。',
     type: 'image_generation',
     source: 'builtin',
     enabled: true,
@@ -45,6 +46,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '解析文档',
     name: 'parse_document',
     description: 'Parse an uploaded document into plain text.',
+    zhDescription: '解析上传的文档文件，提取纯文本内容。',
     type: 'file_processing',
     source: 'builtin',
     enabled: true,
@@ -76,6 +78,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '分析图片（AI看图）',
     name: 'analyze_image',
     description: 'Analyze an image (vision) and return findings.',
+    zhDescription: '用 AI 视觉能力分析图片，回答关于图片的问题。',
     type: 'file_processing',
     source: 'builtin',
     enabled: true,
@@ -101,6 +104,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '执行代码',
     name: 'execute_code',
     description: 'Run JavaScript in a sandbox and return the result.',
+    zhDescription: '在沙箱环境中执行 JavaScript 代码并返回结果。',
     type: 'code_execution',
     source: 'builtin',
     enabled: true,
@@ -133,6 +137,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '联网搜索',
     name: 'web_search',
     description: 'Search the web and return snippets.',
+    zhDescription: '联网搜索信息，返回相关网页摘要。',
     type: 'web_search',
     source: 'builtin',
     enabled: true,
@@ -165,6 +170,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '读取画布内容',
     name: 'get_diagram_xml',
     description: 'Read the current draw.io canvas XML (real node/edge state).',
+    zhDescription: '读取当前 draw.io 画布的 XML 数据，获取真实的节点和连线状态。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -179,6 +185,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '画布截图（AI看图评审）',
     name: 'analyze_diagram_image',
     description: 'Export the canvas to PNG for visual review (mandatory for reviewers).',
+    zhDescription: '将画布导出为 PNG 图片供 AI 视觉评审（评审员必须调用此工具）。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -195,6 +202,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: 'XML整图加载（备选）',
     name: 'load_diagram_xml',
     description: 'Load a whole diagram from a raw XML string (fallback; pure XML only).',
+    zhDescription: '从原始 XML 字符串加载整图画布（备选方案，仅纯 XML）。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -214,6 +222,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '一键画完整流程图',
     name: 'draw_flowchart',
     description: 'Draw the WHOLE flowchart in one call: nodes[] + edges[]. Replaces manual XML.',
+    zhDescription: '一次性绘制完整流程图，传入节点数组和连线数组，替代手动写 XML。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -239,6 +248,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '批量添加节点',
     name: 'add_nodes',
     description: 'Append multiple nodes to the existing canvas (keeps current content).',
+    zhDescription: '批量添加节点到现有画布，保留已有内容。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -259,6 +269,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '批量添加连线',
     name: 'add_edges',
     description: 'Append multiple edges to the existing canvas.',
+    zhDescription: '批量添加连线到现有画布。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -279,6 +290,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '批量修改节点',
     name: 'update_nodes',
     description: 'Batch-update nodes (label/x/y/w/h/color).',
+    zhDescription: '批量修改节点的标签、位置、尺寸、颜色等属性。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -299,6 +311,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '批量删除节点连线',
     name: 'remove_cells',
     description: 'Batch-remove nodes/edges by id (edges of a removed node auto-cleaned).',
+    zhDescription: '按 ID 批量删除节点和连线，删除节点时其关联连线自动清理。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -319,6 +332,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '清空画布',
     name: 'clear_diagram',
     description: 'Clear the whole canvas.',
+    zhDescription: '清空整个画布的所有内容。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -338,6 +352,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '自动优化布局',
     name: 'auto_layout_diagram',
     description: 'Auto-layout the whole diagram: hierarchical layout, orthogonal edges, node overlap fix, libavoid routing. Returns quality score.',
+    zhDescription: '自动优化整图布局：分层布局、正交连线、节点去重、障碍避让路由。返回质量评分。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -363,6 +378,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '流程图质量检测',
     name: 'validate_diagram_quality',
     description: 'Validate diagram quality: node overlap, edge crossing, edge through node, label overlap, diagonal edges, parallel overlap. Returns score (0-100) and issues list.',
+    zhDescription: '检测流程图质量：节点重叠、连线交叉、连线穿节点、标签重叠、斜线连线、并行重叠。返回0-100分和问题列表。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -377,6 +393,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '设置连线路由模式',
     name: 'set_edge_routing',
     description: 'Set edge routing mode: libavoid (best), orthogonal (default), elbow, sideToSide, straight.',
+    zhDescription: '设置连线路由模式：libavoid（最优）、orthogonal（默认）、elbow、sideToSide、straight。',
     type: 'diagram_operation',
     source: 'builtin',
     enabled: true,
@@ -400,6 +417,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '获取当前时间',
     name: 'get_current_time',
     description: 'Get the current date and time.',
+    zhDescription: '获取当前日期和时间。',
     type: 'custom',
     source: 'builtin',
     enabled: true,
@@ -419,6 +437,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '计算器',
     name: 'calculator',
     description: 'Evaluate a math expression.',
+    zhDescription: '计算数学表达式的值。',
     type: 'custom',
     source: 'builtin',
     enabled: true,
@@ -440,6 +459,7 @@ export const builtinTools: ToolDefinition[] = [
     zhName: '保存经验',
     name: 'save_experience',
     description: 'Save a reusable experience/lesson to the library.',
+    zhDescription: '保存可复用的经验/教训到经验库。',
     type: 'custom',
     source: 'builtin',
     enabled: true,
@@ -515,6 +535,93 @@ TASK MODES: single chart / chart+export / multi-chart from an article / modify e
 WORKFLOW: 1) identify mode 2) minimal inputs (topic, type, nodes, edges, export?) 3) plan structure BEFORE generating 4) order: title -> containers -> nodes -> edges -> labels 5) draw_flowchart once 6) verify + report counts.
 CHART TYPE: steps/decisions=flowchart; services=architecture; interactions=sequence; entities=ER; lifecycle=state; concepts=mindmap.
 RULES: plain-text labels; short edge labels; readability over beauty; .drawio source first, export only if asked.
+Always reply in Simplified Chinese.`,
+    toolIds: [
+      'add_node', 'add_edge', 'add_nodes', 'add_edges', 'update_nodes', 'remove_cells',
+      'get_diagram_xml', 'load_diagram_xml', 'draw_flowchart',
+      'clear_diagram', 'analyze_diagram_image', 'parse_document',
+      'auto_layout_diagram', 'validate_diagram_quality', 'set_edge_routing',
+    ],
+    enabled: true,
+    source: 'builtin',
+  },
+  {
+    id: 'skill-github-standard',
+    name: 'GitHub 标准绘图规范',
+    description: '源自 GitHub awesome-copilot 官方 draw-io-diagram-generator 规范：10px 网格对齐、泳道分组、每页≤40个元素、标题规范、语义化配色、正交连线、质量检查清单等工业级最佳实践。',
+    icon: '🐙',
+    triggers: ['github 标准', 'github style', '标准规范', '最佳实践', '工业级', '专业绘图', '高质量图', 'best practices', 'standard', 'professional diagram'],
+    systemPrompt: `You follow the "GitHub Standard" draw.io diagram spec from awesome-copilot.
+
+=== 核心工作流（必须遵守） ===
+1) 理解需求：确认图类型、实体、关系、流向
+2) 规划布局：分层/分区、泳道分组、节点清单、连线清单
+3) 一次画完：用 draw_flowchart(nodes, edges) 完整绘制，禁止逐个添加
+4) 质量自检：调 get_diagram_xml 核对数量 + 调 validate_diagram_quality 查问题
+5) 修复问题：用 update_nodes 调整坐标，所有 warning 清零才交付
+6) 报告结果：节点数、连线数、质量评分
+
+=== 布局规范（Layout） ===
+- 10px 网格对齐：所有坐标为 10 的整数倍
+- 泳道分组：相关节点放入 swimlane 容器，按层级/领域划分
+- 每页单主题：复杂系统用多页面，每页聚焦一个主题
+- 每页 ≤ 40 个元素：超过则拆分或抽象
+- 布局方向：流程图默认从上到下（TB），架构图从左到右（LR）
+
+=== 标签规范（Labels） ===
+- 每页顶部加标题文本：清晰说明本图主题
+- 节点标签简洁：尽量 3 个词以内，用动词短语
+- 连线标签：放在连线中段空白处，不叠在节点上
+- 判断节点（菱形）标签：用问句或条件短语，末尾加"?"
+
+=== 形状语义（Shapes） ===
+- 开始/结束：ellipse（椭圆形）
+- 处理步骤：rounded（圆角矩形）
+- 判断/分支：diamond（菱形）
+- 数据/存储：cylinder（圆柱形）
+- 输入/输出：parallelogram（平行四边形）
+- 子流程/分组：swimlane / rectangle（泳道/矩形容器）
+
+=== 颜色规范（Colors） ===
+- 主流程：蓝色 (#dae8fc / #6c8ebf)
+- 判断分支：黄色 (#fff2cc / #d6b656)
+- 开始/成功：绿色 (#d5e8d4 / #82b366)
+- 结束/错误：红色 (#f8cecc / #b85450)
+- 数据/存储：紫色 (#e1d5e7 / #9673a6)
+- 人工处理：橙色 (#ffe6cc / #d79b00)
+- AI/自动化：青色 (#d0e0e3 / #76a5af)
+
+=== 连线规范（Edges） ===
+- 必须用 orthogonalEdgeStyle（直角连线）+ rounded=1（圆角）
+- 禁止斜线、直线、锐角折线
+- 连线不穿过节点矩形
+- 连线之间不垂直交叉
+- 减少连线重合，必要时调整节点位置
+- 箭头方向统一表达流程方向
+
+=== 质量检查清单（交付前必过） ===
+□ 所有节点对齐 10px 网格
+□ 节点无重叠
+□ 连线不穿过节点
+□ 连线无垂直交叉
+□ 标签可读、不重叠
+□ 颜色语义一致
+□ 形状使用正确
+□ 流向清晰、无死循环（除非是业务循环）
+□ 有开始和结束节点
+□ 每页元素 ≤ 40 个
+
+=== 工具使用规则 ===
+- 新建图：draw_flowchart（唯一入口，一次画完）
+- 追加内容：add_nodes + add_edges（批量）
+- 修改调整：update_nodes（只传要改的字段）
+- 删除清理：remove_cells（按 ID 批量删）
+- 清空白纸：clear_diagram（需 confirm=true）
+- 质量检测：validate_diagram_quality
+- 自动布局：auto_layout_diagram
+- 看图评审：analyze_diagram_image（必须真实看图）
+
+IMPORTANT: 系统硬约束优先级最高——节点不重叠、连线不穿节点、连线用圆角直角、连线上文字避开节点。这些规范在此 Skill 要求之上，必须同时满足。
 Always reply in Simplified Chinese.`,
     toolIds: [
       'add_node', 'add_edge', 'add_nodes', 'add_edges', 'update_nodes', 'remove_cells',

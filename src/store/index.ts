@@ -561,7 +561,8 @@ interface UIState {
   // 画图 Skill 选择：决定执行代理画图时按哪个内置 Skill 规范工作
   // 可选值：'skill-drawio-architecture'（默认 Agents365-ai drawio-skill 衍生）
   //          'skill-aiguide-drawio'（Snailclimb AIGuide drawio-chart）
-  drawSkill: 'skill-drawio-architecture' | 'skill-aiguide-drawio'
+  drawSkill: 'skill-drawio-architecture' | 'skill-aiguide-drawio' | 'skill-github-standard'
+  summaryEnabled: boolean // 画图总结功能开关
 
   setChatPanelWidth: (width: number) => void
   toggleAgentPanel: () => void
@@ -569,17 +570,19 @@ interface UIState {
   toggleMcpPanel: () => void
   setSettingsTab: (tab: UIState['settingsTab']) => void
   setDrawSkill: (id: UIState['drawSkill']) => void
+  toggleSummaryEnabled: () => void
 }
 
 export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
       chatPanelWidth: 380,
-      isAgentPanelOpen: true,
+      isAgentPanelOpen: false,
       isSettingsOpen: false,
       isMcpPanelOpen: false,
       settingsTab: 'model',
       drawSkill: 'skill-drawio-architecture',
+      summaryEnabled: true, // 画图总结功能开关
 
       setChatPanelWidth: (width) => set({ chatPanelWidth: width }),
       toggleAgentPanel: () =>
@@ -590,6 +593,8 @@ export const useUIStore = create<UIState>()(
         set((state) => ({ isMcpPanelOpen: !state.isMcpPanelOpen })),
       setSettingsTab: (tab) => set({ settingsTab: tab }),
       setDrawSkill: (id) => set({ drawSkill: id }),
+      toggleSummaryEnabled: () =>
+        set((state) => ({ summaryEnabled: !state.summaryEnabled })),
     }),
     {
       name: 'flow-agent-ui',

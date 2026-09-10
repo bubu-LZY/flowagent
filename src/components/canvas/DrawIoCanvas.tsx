@@ -157,6 +157,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   const hasLoadedSessionDiagram = useRef(false)
   const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const autoVersionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [isCanvasInExternalWindow, setIsCanvasInExternalWindow] = useState(false)
 
   // 会话状态
   const { currentSessionId, getCurrentSession, saveDiagramXml, saveToDisk } = useSessionStore()
@@ -307,6 +308,23 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
     window.addEventListener('message', handleMessage)
     return () => window.removeEventListener('message', handleMessage)
   }, [handleMessage])
+
+  // 监听画布独立窗口的打开/关闭，控制主窗口 iframe 的卸载（释放内存）
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (!api) return
+    const handleOpened = () => {
+      setIsCanvasInExternalWindow(true)
+      setIsLoaded(false)
+    }
+    const handleClosed = () => {
+      setIsCanvasInExternalWindow(false)
+      // 关闭后重置加载标记，下次渲染 iframe 时重新加载
+      hasLoadedSessionDiagram.current = false
+    }
+    api.onCanvasWindowOpened(handleOpened)
+    api.onCanvasWindowClosed(handleClosed)
+  }, [])
 
   // 画布加载完成后，如果当前会话有流程图，加载它
   useEffect(() => {
@@ -754,7 +772,8 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   }, [isToolbarOpen])
 
   return (
-    <div className="w-full h-full relative bg-gray-100">
+    <div className="w-full h-full relative bg-gray-100 pl-2 box-border" style={{ boxSizing: 'border-box' }}>
+      {/* 左侧留 8px 间距，避免 draw.io 侧边栏拖动条与外部分界条重合造成误触 */}
       {/* 加载状态 */}
       {!isLoaded && !loadError && (
         <div className="absolute inset-0 flex items-center justify-center bg-gray-50 z-10">
@@ -1141,14 +1160,23 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
         </button>
       </div>
 
-      {/* draw.io iframe */}
-      <iframe
-        ref={iframeRef}
-        src={drawioUrl}
-        className="w-full h-full border-0"
-        title="draw.io Editor"
-        onError={handleIframeError}
-      />
+      {/* 画布已拆到独立窗口时，主窗口卸载 iframe 释放内存（约 200-500MB） */}
+      {isCanvasInExternalWindow ? (
+        <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 text-gray-400">
+          <div className="text-6xl mb-4">🪟</div>
+          <p className="text-sm mb-2">画布已在独立窗口中打开</p>
+          <p className="text-xs text-gray-300">主窗口已卸载画布以释放内存</p>
+          <p className="text-xs text-gray-300 mt-1">关闭独立窗口后画布将自动恢复</p>
+        </div>
+      ) : (
+        <iframe
+          ref={iframeRef}
+          src={drawioUrl}
+          className="w-full h-full border-0"
+          title="draw.io Editor"
+          onError={handleIframeError}
+        />
+      )}
     </div>
   )
 }
