@@ -1,7 +1,7 @@
 import type { ChatMessage } from '@/types'
 import { useAgentStore, useModelStore, useChatStore, useVersionStore, useExperienceStore, useSkillStore, useUIStore } from '@/store'
 import { useSessionStore } from '@/store/sessionStore'
-import { generateId, extractMentionedAgentIds, delay } from '@/utils/helpers'
+import { generateId, extractMentionedAgentIds, extractDispatchTags, delay } from '@/utils/helpers'
 import { callAI } from './aiService'
 
 // ============ 系统消息去重（防"任务完成"刷屏） ============
@@ -335,7 +335,7 @@ class MultiAgentOrchestrator {
         ops.setStreaming(targetAgent.id, true)
         try {
           const { messages: latestMsgs } = useChatStore.getState()
-          await this.generateAgentResponse(targetAgent, latestMsgs, ops, !!targetAgent.isCoordinator, true, 1)
+          await this.generateAgentResponse(targetAgent, latestMsgs, ops, !!targetAgent.isCoordinator, true, 0)
         } finally {
           ops.setStreaming(targetAgent.id, false)
         }
@@ -347,7 +347,7 @@ class MultiAgentOrchestrator {
         ops.setStreaming(executor.id, true)
         try {
           const { messages: latestMsgs } = useChatStore.getState()
-          await this.generateAgentResponse(executor, latestMsgs, ops, false, true, 1)
+          await this.generateAgentResponse(executor, latestMsgs, ops, false, true, 0)
         } finally {
           ops.setStreaming(executor.id, false)
         }
@@ -640,9 +640,10 @@ ${skillInfoText}`
       const allToolCalls: any[] = []
 
       // 调用 AI
-      let fullContent = ''
-      try {
-        fullContent = await callAI({
+let fullContent = ''
+    let success = false
+    try {
+      fullContent = await callAI({
           systemPrompt,
           messages: contextMessages,
           agentId: agent.id,
@@ -694,10 +695,46 @@ ${skillInfoText}`
       })
 
       this.failureCounts.delete(agent.id)
+      success = true
 
       // 标记该智能体本轮已回复
       if (!agent.isCoordinator) {
         this.repliedAgentsInRound.add(agent.id)
+      }
+
+      // 铁律3：AI 调度 - 解析 PM/任意智能体回复里 @ 的下一位继续派活
+      // 优先 DISPATCH 行（强制格式），回退到 @-mention 模糊匹配
+      // 仅当本轮正常完成（success=true）才触发链式；失败交给 handleAgentFailure 兜底
+      if (success && !useChatStore.getState().waitingForUser && !useChatStore.getState().isStopped) {
+        const dispatchTags = extractDispatchTags(fullContent)
+        const norm = (x: string) => x.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
+        const seen = new Set<string>()
+        const queue: string[] = []
+        for (const tag of dispatchTags) {
+          const nTag = norm(tag)
+          if (!nTag) continue
+          const a = activeAgents.find(
+            (x) => norm(x.name) === nTag || norm(x.id) === nTag
+          ) ?? activeAgents.find(
+            (x) => norm(x.name).includes(nTag) || nTag.includes(norm(x.name))
+          )
+          if (a && a.id !== agent.id && !seen.has(a.id)) {
+            seen.add(a.id)
+            queue.push(a.id)
+          }
+        }
+        if (queue.length > 0) {
+          console.log(`[orchestrator] ${agent.name} -> 调度链: ${queue.join(', ')}`)
+          const sortedIds = sortAgentsByPriority(queue)
+          for (const nextId of sortedIds) {
+            if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) break
+            const next = activeAgents.find((x) => x.id === nextId)
+            if (!next) continue
+            await delay(400 + Math.random() * 400)
+            if (useChatStore.getState().waitingForUser || useChatStore.getState().isStopped) break
+            await this.generateAgentResponse(next, contextMessages, ops, !!next.isCoordinator, true, 0, activeAgents)
+          }
+        }
       }
     } catch (error: any) {
       console.error(`[orchestrator] ${agent.name}（${agent.id}）回复失败:`, error)
@@ -758,7 +795,7 @@ ${skillInfoText}`
       if (!canContinue()) return
       const { messages: latest } = useChatStore.getState()
       if (!useChatStore.getState().streamingAgents.includes(agent.id)) {
-        await this.generateAgentResponse(agent, latest, ops, false, true, 1, activeAgents)
+        await this.generateAgentResponse(agent, latest, ops, false, true, 0, activeAgents)
       }
       return
     }

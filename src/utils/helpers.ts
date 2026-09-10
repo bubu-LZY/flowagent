@@ -42,14 +42,20 @@ export function extractMentionedAgentIds(
 ): string[] {
   const mentionedNames = parseMentions(text)
   const mentionedIds: string[] = []
+  // 容错：去掉名字里的空格/标点，方便"@项目 经理"这种带空格写法也能匹配
+  const norm = (x: string) => x.toLowerCase().replace(/[\s\-_/\\.·,，。、]/g, '')
 
   for (const name of mentionedNames) {
+    const nName = norm(name)
+    if (!nName) continue
     // 精确匹配：名字完全一致 或 ID 完全一致（大小写不敏感）
-    const agent = agents.find((a) => {
-      const nameMatch = a.name === name
-      const idMatch = a.id.toLowerCase() === name.toLowerCase()
-      return nameMatch || idMatch
-    })
+    let agent = agents.find((a) => norm(a.name) === nName || norm(a.id) === nName)
+    if (!agent) {
+      // 模糊匹配：包含子串（处理"@项目 经理"有空格等情况）
+      agent = agents.find(
+        (a) => norm(a.name).includes(nName) || nName.includes(norm(a.name))
+      )
+    }
     if (agent) {
       // 避免重复添加（同一个智能体可能被多种方式匹配到）
       if (!mentionedIds.includes(agent.id)) {
@@ -488,4 +494,32 @@ function readU16(b: Uint8Array, off: number): number {
 }
 function readU32(b: Uint8Array, off: number): number {
   return (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0
+}
+
+/**
+ * Extract machine-readable dispatch tags from AI reply.
+ * The PM and other agents MUST end their reply with a line like:
+ *   DISPATCH: @设计助手 @架构师
+ *   DISPATCH: none
+ *   DISPATCH: done
+ * Returns the agent *names* (Chinese labels), not ids.
+ * Falls back to plain @-mentions if no DISPATCH line found.
+ */
+export function extractDispatchTags(content: string): string[] {
+  if (!content) return []
+  const lines = content.split(/\r?\n/)
+  let dispatchLine: string | null = null
+  for (const line of lines) {
+    const t = line.trim()
+    if (/^DISPATCH\s*:/i.test(t)) { dispatchLine = t; break }
+  }
+  let tags: string[] = []
+  if (dispatchLine) {
+    const body = dispatchLine.replace(/^DISPATCH\s*:/i, '').trim()
+    if (/^(none|done|stop|end)$/i.test(body)) return []
+    tags = Array.from(body.matchAll(/@([\u4e00-\u9fa5a-zA-Z0-9\-]+)/g)).map((m) => m[1])
+  }
+  if (tags.length === 0) tags = parseMentions(content)
+  // 去重保序
+  return [...new Set(tags)]
 }
