@@ -9,6 +9,12 @@ import {
 import { copyToClipboard } from '@/utils/helpers'
 import { toast } from 'sonner'
 
+function formatFullTime(timestamp: number): string {
+  const d = new Date(timestamp)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
+
 interface LogPanelProps {
   isOpen: boolean
   onClose: () => void
@@ -73,7 +79,7 @@ export const LogPanel: React.FC<LogPanelProps> = ({ isOpen, onClose, sessionId, 
     lines.push(`导出时间：${new Date().toLocaleString('zh-CN')}`)
     lines.push('')
     for (const log of allLogs) {
-      const time = new Date(log.timestamp).toLocaleString('zh-CN')
+      const time = formatFullTime(log.timestamp)
       const typeLabel = getTypeLabel(log.type)
       const agentStr = log.agentName ? `[${log.agentName}]` : ''
       lines.push(`[${time}] [${typeLabel}] ${agentStr} ${log.title}`)

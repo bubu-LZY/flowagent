@@ -130,11 +130,23 @@ function detectEdgeCrossing(edges: { id: string; sourceId: string; targetId: str
   const issues: QualityIssue[] = []
   for (let i = 0; i < edges.length; i++) {
     const e1 = edges[i]
+    const segs1 = buildOrthogonalSegments(e1.sx, e1.sy, e1.tx, e1.ty)
     for (let j = i + 1; j < edges.length; j++) {
       const e2 = edges[j]
       // 端点共享不算交叉
       if (shareEndpoint(e1, e2)) continue
-      if (segmentsIntersect(e1.sx, e1.sy, e1.tx, e1.ty, e2.sx, e2.sy, e2.tx, e2.ty)) {
+      const segs2 = buildOrthogonalSegments(e2.sx, e2.sy, e2.tx, e2.ty)
+
+      let crossed = false
+      outer: for (const s1 of segs1) {
+        for (const s2 of segs2) {
+          if (segmentsIntersect(s1[0], s1[1], s1[2], s1[3], s2[0], s2[1], s2[2], s2[3])) {
+            crossed = true
+            break outer
+          }
+        }
+      }
+      if (crossed) {
         issues.push({
           type: 'edgeCrossing',
           severity: 'warning',
@@ -155,10 +167,18 @@ function detectEdgeThroughNode(
 ): QualityIssue[] {
   const issues: QualityIssue[] = []
   for (const e of edges) {
+    const segs = buildOrthogonalSegments(e.sx, e.sy, e.tx, e.ty)
     for (const v of vertices) {
       // 源/目标节点不算
       if (v.id === e.sourceId || v.id === e.targetId) continue
-      if (lineIntersectsRect(e.sx, e.sy, e.tx, e.ty, v.x, v.y, v.w, v.h)) {
+      let hit = false
+      for (const s of segs) {
+        if (lineIntersectsRect(s[0], s[1], s[2], s[3], v.x, v.y, v.w, v.h)) {
+          hit = true
+          break
+        }
+      }
+      if (hit) {
         issues.push({
           type: 'edgeThroughNode',
           severity: 'error',
@@ -357,6 +377,37 @@ function segmentsIntersect(
   )
 }
 
+/**
+ * 把一条连线近似为正交折线（"工"字形），供质量检测使用。
+ * 画布上的正交连线实际路径由 draw.io 在加载后计算，XML 里通常没有 waypoints，
+ * 因此检测不能用"源中心→目标中心"的直线（会误判大量穿节点/交叉）。
+ * 这里按的主导方向拆成三段：跨层边"竖→横→竖"，同层边"横→竖→横"。
+ */
+function buildOrthogonalSegments(
+  sx: number, sy: number, tx: number, ty: number
+): Array<[number, number, number, number]> {
+  const dx = tx - sx
+  const dy = ty - sy
+
+  if (Math.abs(dy) >= Math.abs(dx)) {
+    // 垂直主导：先竖到中点高度，再横到目标 x，再竖到目标
+    const midY = sy + dy / 2
+    return [
+      [sx, sy, sx, midY],
+      [sx, midY, tx, midY],
+      [tx, midY, tx, ty],
+    ]
+  } else {
+    // 水平主导：先横到中点，再竖到目标 y，再横到目标
+    const midX = sx + dx / 2
+    return [
+      [sx, sy, midX, sy],
+      [midX, sy, midX, ty],
+      [midX, ty, tx, ty],
+    ]
+  }
+}
+
 function lineIntersectsRect(
   x1: number, y1: number, x2: number, y2: number,
   rx: number, ry: number, rw: number, rh: number
@@ -422,9 +473,12 @@ export function formatQualityReportForAI(report: QualityReport): string {
     return lines.join('\n')
   }
 
-  // 按类型分组
+  // 按严重程度排序（先 error 后 warning 后 info），再按类型分组
+  const severityOrder: Record<QualityIssueSeverity, number> = { error: 0, warning: 1, info: 2 }
+  const sorted = [...report.issues].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity])
+
   const grouped: Record<string, QualityIssue[]> = {}
-  for (const issue of report.issues) {
+  for (const issue of sorted) {
     if (!grouped[issue.type]) grouped[issue.type] = []
     grouped[issue.type].push(issue)
   }
@@ -438,22 +492,27 @@ export function formatQualityReportForAI(report: QualityReport): string {
     parallelOverlap: '🟡 平行边重合',
   }
 
-  for (const [type, issues] of Object.entries(grouped)) {
-    lines.push(`${typeLabels[type] || type}（${issues.length}个）：`)
-    for (const issue of issues.slice(0, 5)) {
-      lines.push(`  - ${issue.message}`)
-    }
-    if (issues.length > 5) {
-      lines.push(`  - ...还有 ${issues.length - 5} 个同类问题`)
+  // 逐条列出所有问题（不截断），并按严重级别编号，方便精准定位
+  let idx = 0
+  for (const type of Object.keys(typeLabels) as Array<keyof typeof typeLabels>) {
+    const issues = grouped[type]
+    if (!issues || issues.length === 0) continue
+    lines.push(`${typeLabels[type]}（${issues.length}个）：`)
+    for (const issue of issues) {
+      idx++
+      const sev = issue.severity === 'error' ? '严重' : issue.severity === 'warning' ? '警告' : '提示'
+      lines.push(`  ${idx}. [${sev}] ${issue.message}`)
     }
     lines.push('')
   }
 
-  if (report.errorCount > 0) {
-    lines.push('⛔ 存在严重问题，必须重画修复！')
-  } else if (report.warningCount > 0) {
-    lines.push('⚠️ 存在警告，建议优化调整。')
-  }
+  // 精准修复指引：告诉 AI 具体怎么改，而不是笼统"重画"
+  lines.push('【修复指引】')
+  lines.push('请基于当前画布进行「精准修复」，不要清空画布、不要整张重画：')
+  lines.push('1. 节点重叠 / 连线穿节点 / 标签压节点 / 连线交叉 → 用 update_nodes 移动相关节点的 x/y 坐标，把它们拉开、错位，使连线避开节点。')
+  lines.push('2. 斜线连线 → 用 set_edge_routing 切换为正交路由（orthogonal），不要改节点位置。')
+  lines.push('3. 平行边重合 → 用 update_nodes 微调相关节点的坐标，让两条边错开。')
+  lines.push('4. 修复后再次调用 validate_diagram_quality 复检，直到无严重问题且评分达标。')
 
   return lines.join('\n')
 }

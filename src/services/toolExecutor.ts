@@ -1955,12 +1955,12 @@ async function executeValidateDiagramQuality() {
       warningCount: report.warningCount,
       infoCount: report.infoCount,
       summary: report.summary,
-      issues: report.issues.slice(0, 15).map((i) => ({
+      issues: report.issues.map((i) => ({
         type: i.type,
         severity: i.severity,
         message: i.message,
       })),
-      needsRedraw: report.errorCount > 0 || report.score < 60,
+      needsFix: report.errorCount > 0 || report.score < 70,
       fullReport: aiReport,
     }
   } catch (e: any) {

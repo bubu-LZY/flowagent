@@ -5,6 +5,7 @@ import { useSessionStore } from '@/store/sessionStore'
 import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay, parseMentions } from '@/utils/helpers'
 import { callAI } from './aiService'
 import { addLog } from './logService'
+import { validateDiagramQuality, formatQualityReportForAI } from './diagramQuality'
 
 // ============ 系统消息去重（防"任务完成"刷屏） ============
 // 一次会话内，系统提示如果和最近 8 条 fingerprint 重复，就不重复插；
@@ -66,6 +67,28 @@ function sortAgentsByPriority(agentIds: string[]): string[] {
     const prioB = AGENT_PRIORITY[b] ?? 99
     return prioA - prioB
   })
+}
+
+// 把任意值安全转成日志文本
+// 普通工具参数/结果不截断（保证日志完整、可复现），仅对超大 base64 图片等二进制数据做省略
+function stringifyForLog(value: any): string {
+  if (value === undefined || value === null) return ''
+  let s: string
+  try {
+    s = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  } catch {
+    s = String(value)
+  }
+  const MAX_LOG_CONTENT = 200000
+  if (s && s.length > MAX_LOG_CONTENT) {
+    // base64 图片/二进制：只保留提示，正文无意义
+    if (s.startsWith('data:image') || /^[A-Za-z0-9+/=]{1000,}/.test(s.slice(0, 1000))) {
+      s = s.slice(0, 500) + `\n…（图片/二进制数据已省略，原始长度 ${s.length} 字符）`
+    } else {
+      s = s.slice(0, MAX_LOG_CONTENT) + `\n…（内容已截断，原始长度 ${s.length} 字符）`
+    }
+  }
+  return s
 }
 
 // 聊天操作接口
@@ -139,9 +162,9 @@ function appendDrawSkillBlock(systemPrompt: string, drawSkillId: string, planMod
     '   - 平行连线不能重合在一起，要分散开让每条线都清晰可见。\n' +
     // === 布局质量自检 ===
     '11. After drawing, ALWAYS call validate_diagram_quality to check quality.\n' +
-    '    - If score >= 80: good, report and finish.\n' +
-    '    - If score < 80: call auto_layout_diagram to auto-fix layout.\n' +
-    '    - If still bad after auto-layout, redraw manually with better coordinates.\n' +
+    '    - If score >= 70 and no errors: good, report and finish.\n' +
+    '    - If score < 70 or has errors: fix SPECIFIC problems (see report) — use update_nodes to move only the offending nodes, do NOT clear the canvas, do NOT redraw the whole chart.\n' +
+    '    - Keep the rest of the diagram intact; only adjust what the report points out.\n' +
     '12. auto_layout_diagram: one-click layout optimization (hierarchical + orthogonal + libavoid).\n' +
     '    - direction: TB (top-to-bottom) or LR (left-to-right), default TB.\n' +
     '    - enableLibavoid: true (default) for obstacle-avoiding edge routing.\n' +
@@ -180,6 +203,8 @@ class MultiAgentOrchestrator {
   private designerRetryCount = 0
   // 评审员连续 FAIL 次数（每轮重置，超过上限回 PM 防死循环）
   private reviewerFailCount = 0
+  // 交付质量门禁连续拦截次数（PM 拍板交付被拦 +1，超过上限停止交付防死循环）
+  private deliveryGateFailCount = 0
 
   // 【修复 P0-4】会话级状态（之前是模块级全局变量，导致跨会话污染）
   // "任务交付已完成" 会话级锁：一旦 PM 拍板交付，置 true，之后任何新用户输入
@@ -269,6 +294,40 @@ class MultiAgentOrchestrator {
     } catch (e) {
       console.warn('[orchestrator] 画布校验失败，按非空处理:', e)
       return false
+    }
+  }
+
+  // 交付前质量门禁：节点非空 + 质量分数达标 + 无严重问题，否则拒绝交付
+  private async checkDeliveryQuality(): Promise<{ pass: boolean; score: number; reason: string; issues: string[] }> {
+    try {
+      const win = window as any
+      if (!win.drawioApi?.getXml) {
+        return { pass: false, score: 0, reason: '画布 API 不可用，无法校验交付质量', issues: [] }
+      }
+      const xml = await win.drawioApi.getXml()
+      const nodes = (xml || '').match(/vertex="1"/g)?.length || 0
+      if (nodes <= 1) {
+        return { pass: false, score: 0, reason: `画布为空（节点数 ${nodes}），不能交付`, issues: [] }
+      }
+      const cells = parseXmlToCells(xml || '')
+      if (!cells) {
+        return { pass: false, score: 0, reason: '画布内容无法解析，不能交付', issues: [] }
+      }
+      const report = validateDiagramQuality(cells)
+      const QUALITY_THRESHOLD = 70
+      if (report.score < QUALITY_THRESHOLD || report.errorCount > 0) {
+        // 返回全部问题（不截断），每条都带具体节点/连线 id，方便精准定位
+        const allIssues = (report.issues || []).map((i: any) => `[${i.severity === 'error' ? '严重' : i.severity === 'warning' ? '警告' : '提示'}] ${i.message}`)
+        return {
+          pass: false,
+          score: report.score,
+          reason: `质量评分 ${report.score}/100 未达标（需 ≥${QUALITY_THRESHOLD} 且无严重问题），存在 ${report.errorCount} 个严重问题、${report.warningCount} 个警告、${report.infoCount} 个提示`,
+          issues: allIssues,
+        }
+      }
+      return { pass: true, score: report.score, reason: `质量评分 ${report.score}/100 达标`, issues: [] }
+    } catch (e: any) {
+      return { pass: false, score: 0, reason: `质量校验异常：${e.message || '未知错误'}`, issues: [] }
     }
   }
 
@@ -560,7 +619,7 @@ decision1 -> process1 | 否
       agentName: '用户',
       agentAvatar: '👑',
       agentColor: '#6366f1',
-      content: userMessage.content.slice(0, 500),
+      content: userMessage.content,
       metadata: { messageLength: userMessage.content.length },
     })
 
@@ -612,6 +671,7 @@ decision1 -> process1 | 否
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
       this.reviewerFailCount = 0
+      this.deliveryGateFailCount = 0
     } else {
       // 轮数只用来限制"讨论"，不该用来卡死"执行"：
       // 用户在等待后回复（通常是追加指令/催进度），如果任务还没完成（画布为空），
@@ -1025,6 +1085,14 @@ ${skillInfoText}${toolsInfo}`
             onToolCall: (toolCall: any) => {
               useChatStore.getState().addToolCall(messageId, toolCall)
               allToolCalls.push(toolCall)
+              addLog(sessionId, 'tool_call', `调用工具 ${toolCall.name}`, {
+                agentId: agent.id,
+                agentName: agent.name,
+                agentAvatar: agent.avatar,
+                agentColor: agent.color,
+                content: stringifyForLog(toolCall.args),
+                metadata: { tool: toolCall.name, callId: toolCall.id },
+              })
             },
             onToolResult: (toolCallId: string, result: any) => {
               const updates: any = {
@@ -1039,6 +1107,15 @@ ${skillInfoText}${toolsInfo}`
                 tc.status = updates.status
                 tc.errorMessage = updates.errorMessage
               }
+              const toolName = tc?.name || 'unknown'
+              addLog(sessionId, result?.success === false ? 'error' : 'tool_result', `工具返回 ${toolName}`, {
+                agentId: agent.id,
+                agentName: agent.name,
+                agentAvatar: agent.avatar,
+                agentColor: agent.color,
+                content: stringifyForLog(result),
+                metadata: { tool: toolName, callId: toolCallId, success: result?.success !== false },
+              })
             },
           }),
           new Promise<string>((_, reject) => {
@@ -1192,7 +1269,7 @@ ${skillInfoText}${toolsInfo}`
         agentName: agent.name,
         agentAvatar: agent.avatar,
         agentColor: agent.color,
-        content: fullContent.slice(0, 500),
+        content: fullContent,
         metadata: {
           success,
           toolCalls: allToolCalls.length,
@@ -1314,6 +1391,66 @@ ${skillInfoText}${toolsInfo}`
 
         // nextAction.type === 'end' 或 'none' → 流程结束或暂不调度
         if (nextAction.type === 'end' && agent.isCoordinator) {
+          // 交付前质量门禁：硬性要求（节点非空 + 分数≥70 + 无严重问题）不达标就拒绝交付
+          const quality = await this.checkDeliveryQuality()
+          if (!quality.pass) {
+            this.deliveryGateFailCount += 1
+            addLog(sessionId, 'error', '交付被质量门禁拦截', {
+              agentId: agent.id,
+              agentName: agent.name,
+              agentAvatar: agent.avatar,
+              agentColor: agent.color,
+              content: `${quality.reason}${quality.issues.length ? '\n' + quality.issues.join('\n') : ''}`,
+              metadata: { score: quality.score, pass: false, failCount: this.deliveryGateFailCount },
+            })
+
+            const executor = activeAgents.find((a) => a.id === 'executor')
+            if (executor && this.deliveryGateFailCount < 3) {
+              const reminderMsg: ChatMessage = {
+                id: generateId(),
+                role: 'assistant',
+                agentId: 'system',
+                agentName: '系统',
+                agentAvatar: '🛡️',
+                agentColor: '#f59e0b',
+                content: `⛔ 交付被质量门禁拦截（第 ${this.deliveryGateFailCount} 次）：${quality.reason}。
+
+【精准修复要求 · 禁止整图重画】
+- 不要调用 clear_diagram / draw_flowchart 重新生成整张图
+- 保持当前画布不变，只针对下面列出的具体问题逐个修复
+- 定位到具体节点/连线后，用 update_nodes 移动相关节点的坐标来消除重叠、交叉、穿节点
+- 如果是斜线/路由问题，用 set_edge_routing 切换为正交路由
+- 修复完成后调用 validate_diagram_quality 复检，直到评分 ≥70 且无严重问题
+
+具体问题清单：
+${quality.issues.join('\n')}`,
+                timestamp: Date.now(),
+              }
+              ops.addMessage(reminderMsg)
+              this.repliedAgentsInRound.delete(executor.id)
+              const { messages: latestMessages } = useChatStore.getState()
+              await delay(400)
+              await this.generateAgentResponse(executor, latestMessages, ops, false, true, chainLevel + 1, activeAgents)
+            } else {
+              // 达到拦截上限或没有执行代理：不再交付劣质结果，明确上报用户
+              addLog(sessionId, 'error', '质量门禁：自动修复多次仍未达标，已停止交付', {
+                agentId: agent.id,
+                agentName: agent.name,
+                agentAvatar: agent.avatar,
+                agentColor: agent.color,
+                content: quality.reason,
+              })
+              this.addSystemNoteUnique(
+                ops,
+                `⛔ 已停止交付：自动修复多次仍未能达到硬性质量要求。${quality.reason}`,
+                { avatar: '⚠️', color: '#ef4444', taskCompletion: true }
+              )
+            }
+            ops.setStreaming(agent.id, false)
+            return
+          }
+
+          this.deliveryGateFailCount = 0
           console.log(`[orchestrator] 流程结束：${nextAction.reason}`)
           this.conversationDelivered = true
           this.addSystemNoteUnique(

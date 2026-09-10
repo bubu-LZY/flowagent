@@ -1,7 +1,9 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
+import { toast } from 'sonner'
 import { useSessionStore } from '@/store/sessionStore'
 import { useVersionStore } from '@/store'
-import { isElectron, generateId, parseXmlToCells } from '@/utils/helpers'
+import { isElectron, generateId, parseXmlToCells, copyToClipboard, copyImageToClipboard } from '@/utils/helpers'
+import type { DiagramCellInfo } from '@/utils/helpers'
 import { validateDiagramQuality, formatQualityReportForAI } from '@/services/diagramQuality'
 import { layoutDiagram, fixNodeOverlap } from '@/services/diagramLayout'
 import { setEdgeRoutingMode, spreadParallelEdges, EdgeRoutingMode, EDGE_ROUTING_MODES } from '@/services/diagramRouting'
@@ -51,6 +53,75 @@ const EMPTY_DIAGRAM_XML = `<mxGraphModel dx="1434" dy="742" grid="1" gridSize="1
     <mxCell id="1" parent="0" />
   </root>
 </mxGraphModel>`
+
+// 把画布 XML 渲染成 SVG 缩略图（用于版本历史预览，只读、不依赖网络）
+function renderDiagramPreviewSvg(xml: string): string {
+  const cells = parseXmlToCells(xml)
+  if (!cells || cells.size === 0) return ''
+
+  const vertices: { id: string; value: string; style: string; x: number; y: number; width: number; height: number }[] = []
+  const edges: { id: string; sourceId: string; targetId: string }[] = []
+  cells.forEach((c: DiagramCellInfo) => {
+    if (c.type === 'vertex') {
+      vertices.push({ id: c.id, value: c.value, style: c.style, x: c.x ?? 0, y: c.y ?? 0, width: c.width ?? 120, height: c.height ?? 60 })
+    } else if (c.type === 'edge' && c.sourceId && c.targetId) {
+      edges.push({ id: c.id, sourceId: c.sourceId, targetId: c.targetId })
+    }
+  })
+  if (vertices.length === 0) return ''
+
+  const pad = 24
+  const minX = Math.min(...vertices.map((v) => v.x))
+  const minY = Math.min(...vertices.map((v) => v.y))
+  const maxX = Math.max(...vertices.map((v) => v.x + v.width))
+  const maxY = Math.max(...vertices.map((v) => v.y + v.height))
+  const vbW = Math.max(maxX - minX + pad * 2, 10)
+  const vbH = Math.max(maxY - minY + pad * 2, 10)
+
+  const center = new Map<string, { x: number; y: number }>()
+  for (const v of vertices) center.set(v.id, { x: v.x + v.width / 2, y: v.y + v.height / 2 })
+
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+  const parts: string[] = []
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX - pad} ${minY - pad} ${vbW} ${vbH}" width="100%" height="100%">`)
+  parts.push(`<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6b7280"/></marker></defs>`)
+
+  for (const e of edges) {
+    const s = center.get(e.sourceId)
+    const t = center.get(e.targetId)
+    if (!s || !t) continue
+    parts.push(`<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="#9ca3af" stroke-width="1.5" marker-end="url(#arrow)"/>`)
+  }
+
+  for (const v of vertices) {
+    const isDiamond = /rhombus/.test(v.style)
+    const isEllipse = /ellipse/.test(v.style)
+    const fill = '#dae8fc'
+    const stroke = '#6c8ebf'
+    const cx = v.x + v.width / 2
+    const cy = v.y + v.height / 2
+    if (isEllipse) {
+      parts.push(`<ellipse cx="${cx}" cy="${cy}" rx="${v.width / 2}" ry="${v.height / 2}" fill="${fill}" stroke="${stroke}"/>`)
+    } else if (isDiamond) {
+      parts.push(`<polygon points="${cx},${v.y} ${v.x + v.width},${cy} ${cx},${v.y + v.height} ${v.x},${cy}" fill="${fill}" stroke="${stroke}"/>`)
+    } else {
+      parts.push(`<rect x="${v.x}" y="${v.y}" width="${v.width}" height="${v.height}" rx="8" fill="${fill}" stroke="${stroke}"/>`)
+    }
+    // 多行标签
+    const lines = v.value.replace(/<br\s*\/?>/gi, '\n').split('\n').slice(0, 4)
+    const fontSize = 11
+    const lineH = fontSize + 3
+    const totalH = lines.length * lineH
+    lines.forEach((line, i) => {
+      const y = cy - totalH / 2 + i * lineH + fontSize / 2
+      parts.push(`<text x="${cx}" y="${y}" text-anchor="middle" font-family="sans-serif" font-size="${fontSize}" fill="#333333">${esc(line)}</text>`)
+    })
+  }
+
+  parts.push('</svg>')
+  return parts.join('')
+}
 
 // 转义 XML 特殊字符
 // 注意：先将换行符转为 HTML 换行 <br>（draw.io 支持 HTML 渲染），再做 XML 转义
@@ -158,6 +229,8 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   const autoSaveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const autoVersionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isCanvasInExternalWindow, setIsCanvasInExternalWindow] = useState(false)
+  const [previewData, setPreviewData] = useState<{ xml: string; label: string } | null>(null)
+  const [qualityReportText, setQualityReportText] = useState<string | null>(null)
 
   // 会话状态
   const { currentSessionId, getCurrentSession, saveDiagramXml, saveToDisk } = useSessionStore()
@@ -541,11 +614,29 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
     [isLoaded, generateDiagramXml, sendMessage, saveToSession]
   )
 
+  // 在替换/清空画布前，把当前非空画布保存为快照，防止 AI 重画时丢弃中途的好版本
+  const saveSnapshotBeforeReplace = useCallback(
+    (label: string) => {
+      if (!currentSessionId) return
+      const xml = lastXmlRef.current
+      if (!xml || xml === EMPTY_DIAGRAM_XML) return
+      const { saveVersion, getLatestVersion } = useVersionStore.getState()
+      const latest = getLatestVersion(currentSessionId)
+      if (latest && latest.xml === xml) return // 内容与最新版本一致，不重复存
+      saveVersion(currentSessionId, xml, label, 'agent')
+      console.log(`[DrawIoCanvas] ${label}，已保存画布快照`)
+    },
+    [currentSessionId]
+  )
+
   // 清空画布
   const clearDiagram = useCallback((): { success: boolean; message: string } => {
     if (!isLoaded) {
       return { success: false, message: 'draw.io 画布尚未加载完成，请稍后再试' }
     }
+
+    // 清空前保留快照，避免中途好版本丢失
+    saveSnapshotBeforeReplace('清空前自动备份')
 
     cellsRef.current.clear()
     lastXmlRef.current = EMPTY_DIAGRAM_XML
@@ -558,7 +649,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
       success: true,
       message: '画布已清空',
     }
-  }, [isLoaded, sendMessage, saveToSession])
+  }, [isLoaded, sendMessage, saveToSession, saveSnapshotBeforeReplace])
 
   // 加载 XML（会重置内部状态）
   const loadXmlInternal = useCallback(
@@ -580,6 +671,10 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
           : '内容不是 XML（可能是文件路径或聊天记录文本，请直接传 XML 字符串）'
         return { success: false, message: `XML 解析失败，${tip}，未加载到画布` }
       }
+      // 重画前保留快照（内容变化时才存，避免重复加载相同内容产生冗余版本）
+      if (xml !== lastXmlRef.current) {
+        saveSnapshotBeforeReplace('重画前自动备份')
+      }
       cellsRef.current = parsed as Map<string, DiagramCell>
 
       lastXmlRef.current = xml
@@ -598,7 +693,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
         message: '图表已加载',
       }
     },
-    [isLoaded, sendMessage, currentSessionId, saveDiagramXml, saveToDisk]
+    [isLoaded, sendMessage, currentSessionId, saveDiagramXml, saveToDisk, saveSnapshotBeforeReplace]
   )
 
   // 获取当前 XML
@@ -904,24 +999,33 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
                               <span className="text-xs text-gray-400">
                                 {timeStr}
                               </span>
-                              <button
-                                onClick={() => {
-                                  const xml = restoreVersion(currentSessionId!, v.id)
-                                  if (xml) {
-                                    loadXmlInternal(xml)
-                                    // 保存恢复后的状态为新版本
-                                    saveVersion(
-                                      currentSessionId!,
-                                      xml,
-                                      `恢复至 ${v.label}`,
-                                      'user'
-                                    )
-                                  }
-                                }}
-                                className="text-xs text-primary hover:text-primary-hover hover:underline"
-                              >
-                                恢复
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => setPreviewData({ xml: v.xml, label: v.label })}
+                                  className="text-xs text-blue-500 hover:text-blue-600 hover:underline"
+                                >
+                                  预览
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const xml = restoreVersion(currentSessionId!, v.id)
+                                    if (xml) {
+                                      loadXmlInternal(xml)
+                                      // 保存恢复后的状态为新版本
+                                      saveVersion(
+                                        currentSessionId!,
+                                        xml,
+                                        `恢复至 ${v.label}`,
+                                        'user'
+                                      )
+                                      setPreviewData(null)
+                                    }
+                                  }}
+                                  className="text-xs text-primary hover:text-primary-hover hover:underline"
+                                >
+                                  恢复
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )
@@ -1027,7 +1131,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
                           const report = validateDiagramQuality(cells)
                           setQualityScore(report.score)
                           const msg = formatQualityReportForAI(report)
-                          alert(msg)
+                          setQualityReportText(msg)
                         }
                       } catch (e) {
                         console.error('质量检测失败:', e)
@@ -1133,6 +1237,28 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
                 </svg>
                 导出 XML
               </button>
+              <button
+                onClick={async () => {
+                  if (!isLoaded) {
+                    toast.error('画布未就绪')
+                    return
+                  }
+                  try {
+                    const dataUrl = await exportImageInternal('png')
+                    const ok = await copyImageToClipboard(dataUrl)
+                    if (ok) toast.success('流程图已复制为图片')
+                    else toast.error('复制图片失败')
+                  } catch (e) {
+                    toast.error('导出图片失败')
+                  }
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50 rounded-lg transition-colors"
+              >
+                <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.121 4.121a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" />
+                </svg>
+                复制为图片
+              </button>
             </div>
           </div>
         )}
@@ -1176,6 +1302,108 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
           title="draw.io Editor"
           onError={handleIframeError}
         />
+      )}
+
+      {/* 版本预览弹窗：先看再决定是否恢复，避免"想看一眼却被迫恢复" */}
+      {previewData && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={() => setPreviewData(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-[82%] h-[82%] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gray-50">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm font-semibold text-gray-800">版本预览</span>
+                <span className="text-xs text-gray-400 truncate">{previewData.label}</span>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => {
+                    if (currentSessionId) {
+                      loadXmlInternal(previewData.xml)
+                      saveVersion(currentSessionId, previewData.xml, `恢复至 ${previewData.label}`, 'user')
+                    }
+                    setPreviewData(null)
+                  }}
+                  className="px-3 py-1.5 text-xs rounded-md bg-primary text-white hover:bg-primary-hover transition-colors"
+                >
+                  恢复此版本
+                </button>
+                <button
+                  onClick={() => setPreviewData(null)}
+                  className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto bg-gray-100 p-4">
+              <div
+                className="w-full h-full bg-white rounded-md shadow-inner flex items-center justify-center"
+                dangerouslySetInnerHTML={{
+                  __html: renderDiagramPreviewSvg(previewData.xml) || '<p class="text-gray-400 text-sm">该版本画布为空</p>',
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    {/* 质量检测报告弹窗：可选中文字、可复制报告文本、可复制流程图 */}
+      {qualityReportText && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={() => setQualityReportText(null)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-[76%] h-[82%] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gray-50">
+              <span className="text-sm font-semibold text-gray-800">流程图质量检测报告</span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={async () => {
+                    try {
+                      const dataUrl = await exportImageInternal('png')
+                      const ok = await copyImageToClipboard(dataUrl)
+                      if (ok) toast.success('流程图已复制到剪贴板')
+                      else toast.error('流程图复制失败')
+                    } catch (e) {
+                      toast.error('导出图片失败')
+                    }
+                  }}
+                  className="px-3 py-1.5 text-xs rounded-md bg-primary text-white hover:bg-primary-hover transition-colors"
+                >
+                  复制流程图
+                </button>
+                <button
+                  onClick={async () => {
+                    const ok = await copyToClipboard(qualityReportText)
+                    if (ok) toast.success('报告已复制到剪贴板')
+                    else toast.error('报告复制失败')
+                  }}
+                  className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100 border border-gray-200 transition-colors"
+                >
+                  复制报告
+                </button>
+                <button
+                  onClick={() => setQualityReportText(null)}
+                  className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto bg-white p-4">
+              <pre className="whitespace-pre-wrap select-text text-sm text-gray-800 leading-relaxed font-sans">
+                {qualityReportText}
+              </pre>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

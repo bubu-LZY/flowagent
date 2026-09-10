@@ -40,6 +40,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     show: (title, body) => ipcRenderer.invoke('notification:show', { title, body }),
   },
 
+  // 剪贴板（图片/文本）
+  clipboard: {
+    writeImage: (dataUrl) => ipcRenderer.invoke('clipboard:write-image', dataUrl),
+    writeText: (text) => ipcRenderer.invoke('clipboard:write-text', text),
+  },
+
   // 会话管理 API
   session: {
     list: () => ipcRenderer.invoke('session:list'),

@@ -104,6 +104,33 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+// 复制图片到剪贴板（data URL，如 data:image/png;base64,...）
+// 优先走 Electron 主进程 clipboard 模块，保证图片可靠写入；非 Electron 环境降级到 navigator.clipboard
+export async function copyImageToClipboard(dataUrl: string): Promise<boolean> {
+  if (!dataUrl || typeof dataUrl !== 'string') return false
+
+  // Electron 环境：主进程 clipboard.writeImage
+  const electronClipboard = (window as any).electronAPI?.clipboard
+  if (electronClipboard?.writeImage) {
+    try {
+      return await electronClipboard.writeImage(dataUrl)
+    } catch (e) {
+      console.error('[copyImageToClipboard] 主进程写入失败，尝试降级:', e)
+    }
+  }
+
+  // 降级：navigator.clipboard + ClipboardItem
+  try {
+    const res = await fetch(dataUrl)
+    const blob = await res.blob()
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })])
+    return true
+  } catch (e) {
+    console.error('[copyImageToClipboard] 降级写入失败:', e)
+    return false
+  }
+}
+
 // 格式化时间
 export function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString('zh-CN', {

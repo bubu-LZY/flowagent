@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { toast } from 'sonner'
 import type { ChatMessage, ToolCall } from '@/types'
 import { useAgentStore, useChatStore, useSkillStore } from '@/store'
 import { getAllMentionableAgents } from '@/config/agents'
+import { copyImageToClipboard } from '@/utils/helpers'
 
 // 格式化耗时
 function formatDuration(ms: number): string {
@@ -488,6 +490,29 @@ export const ChatMessageItem: React.FC<Props> = React.memo(({ message, defaultCo
                   )}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* AI 返回的图片截图（如评审员看图评审产出的画布 PNG） */}
+          {message.imageDataUrl && !isUser && (
+            <div className="mt-3 relative group">
+              <img
+                src={message.imageDataUrl}
+                alt="AI 生成的画布截图"
+                className="max-w-full rounded-lg border border-gray-200 shadow-sm"
+                style={{ maxHeight: 360, objectFit: 'contain' }}
+              />
+              <button
+                onClick={async () => {
+                  const ok = await copyImageToClipboard(message.imageDataUrl!)
+                  if (ok) toast.success('图片已复制到剪贴板')
+                  else toast.error('图片复制失败')
+                }}
+                className="absolute top-2 right-2 px-2.5 py-1.5 text-xs rounded-md bg-black/60 text-white opacity-0 group-hover:opacity-100 hover:bg-black/80 transition-opacity backdrop-blur-sm"
+                title="复制图片到剪贴板"
+              >
+                📋 复制图片
+              </button>
             </div>
           )}
 

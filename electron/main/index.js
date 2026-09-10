@@ -1,7 +1,15 @@
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell, powerSaveBlocker, clipboard } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const mcpServer = require('./mcp-server.cjs')
+
+// 关键修复：窗口最小化/隐藏到托盘后，Chromium 会把渲染进程后台化（renderer backgrounding），
+// 导致 AI 流式请求（SSE）收不到数据、后台调度卡死。以下开关强制渲染进程持续运行。
+// 必须放在 app.whenReady() 之前才生效。
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 // 计算正确的路径
 // 打包后 asar 内的结构：
@@ -230,6 +238,37 @@ if (!isDev) {
     })
     notification.show()
     return true
+  })
+
+  // ========== 剪贴板（支持图片/文本） ==========
+  // 渲染进程无法直接用 navigator.clipboard 写入图片（Chromium 对 image/png 限制多），
+  // 统一走主进程 clipboard 模块，保证"复制流程图/截图到剪贴板"可靠。
+  ipcMain.handle('clipboard:write-image', (_, dataUrl) => {
+    try {
+      if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+        throw new Error('无效的图片数据')
+      }
+      const image = nativeImage.createFromDataURL(dataUrl)
+      if (image.isEmpty()) {
+        throw new Error('图片解析失败')
+      }
+      clipboard.writeImage(image)
+      return true
+    } catch (e) {
+      console.error('[clipboard:write-image] 失败:', e && e.message)
+      return false
+    }
+  })
+
+  ipcMain.handle('clipboard:write-text', (_, text) => {
+    try {
+      if (text == null) return true
+      clipboard.writeText(String(text))
+      return true
+    } catch (e) {
+      console.error('[clipboard:write-text] 失败:', e && e.message)
+      return false
+    }
   })
 
   // ========== 会话文件系统存储 ==========
@@ -848,6 +887,9 @@ updatedAt: ${now}
   app.whenReady().then(() => {
     createWindow()
     createTray()
+
+    // 防止系统休眠挂起应用，保证后台调度与网络请求持续执行
+    powerSaveBlocker.start('prevent-app-suspension')
 
     // 设置 MCP 服务的主窗口引用
     mcpServer.setMainWindow(mainWindow)

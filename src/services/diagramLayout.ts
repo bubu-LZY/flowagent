@@ -649,15 +649,20 @@ function assignCoordinates(nodes: Map<string, LayoutNode>, opts: Required<Layout
     }
   }
 
-  // 计算每层总宽度
+  // 计算每层总宽度（按层索引对齐，防止层有空洞时 push 顺序与 li 错位）
   const layerWidths: number[] = []
   let maxLayerWidth = 0
-  for (const layer of layers) {
-    if (!layer) continue
+  for (let li = 0; li < layers.length; li++) {
+    const layer = layers[li]
+    if (!layer) {
+      layerWidths[li] = 0
+      continue
+    }
     const totalWidth = layer.reduce((sum, n) => sum + n.width, 0)
     const gaps = (layer.length - 1) * opts.nodeGap
-    layerWidths.push(totalWidth + gaps)
-    if (totalWidth + gaps > maxLayerWidth) maxLayerWidth = totalWidth + gaps
+    const w = totalWidth + gaps
+    layerWidths[li] = w
+    if (w > maxLayerWidth) maxLayerWidth = w
   }
 
   const startX = 60
