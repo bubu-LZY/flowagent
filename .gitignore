@@ -26,3 +26,6 @@ QUICK_PUBLISH.ps1
 
 # Local docs guides (workflow / publish guide) - kept local, not published
 docs/
+
+# Vite temp files (contain absolute paths - DO NOT commit)
+src/vite.config.ts.timestamp-*.mjs
