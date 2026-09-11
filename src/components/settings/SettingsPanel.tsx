@@ -1090,7 +1090,7 @@ export const GeneralSettings: React.FC = () => {
   const [isElectronEnv, setIsElectronEnv] = useState(false)
   const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [resetStep, setResetStep] = useState(0) // 0: 初始, 1: 第一次确认后, 2: 第二次确认后执行
-  const [appVersion, setAppVersion] = useState('0.5.3')
+  const [appVersion, setAppVersion] = useState('0.5.4')
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false)
   const [updateResult, setUpdateResult] = useState<'none' | 'latest' | 'available' | 'error'>('none')
   const [latestVersion, setLatestVersion] = useState<string>('')
@@ -1654,7 +1654,7 @@ const McpSettings: React.FC = () => {
     return `---
 name: flowchart-agent-mcp
 description: 通过 MCP 协议调用 Flowchart Agent，让 AI 助手可以直接操作流程图画布、管理会话、触发多智能体协作。所有调用在后台独立会话中执行，不影响用户当前使用。
-version: 0.5.3
+version: 0.5.4
 author: Flowchart Agent Team
 triggers: [流程图, 画图, drawio, 流程设计, 架构图]
 ---
@@ -1917,7 +1917,7 @@ png_result = mcp.call_tool("export_diagram", {
 - 更新客户端配置中的 Token
 
 **问题：画布操作返回权限错误**
-- 确保使用的是 v0.5.3 及以上版本
+- 确保使用的是 v0.5.4 及以上版本
 - 旧版本可能存在 MCP 工具权限校验问题，请升级到最新版
 `
   }

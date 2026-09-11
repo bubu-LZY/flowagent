@@ -331,6 +331,73 @@ class MultiAgentOrchestrator {
     }
   }
 
+  // 交付前质量门禁强制执行：通过返回 true；未通过则记日志、派执行代理修复并返回 false。
+  // 供两处交付路径复用（PM @用户 交付前 + 状态机 end 交付前），确保严重问题绝不放行。
+  private async enforceDeliveryGate(
+    agent: any,
+    ops: ChatOperations,
+    chainLevel: number,
+    activeAgents: any[]
+  ): Promise<boolean> {
+    const sessionId = useSessionStore.getState().currentSessionId || 'default'
+    const quality = await this.checkDeliveryQuality()
+    if (quality.pass) {
+      this.deliveryGateFailCount = 0
+      return true
+    }
+    this.deliveryGateFailCount += 1
+    addLog(sessionId, 'error', '交付被质量门禁拦截', {
+      agentId: agent.id,
+      agentName: agent.name,
+      agentAvatar: agent.avatar,
+      agentColor: agent.color,
+      content: `${quality.reason}${quality.issues.length ? '\n' + quality.issues.join('\n') : ''}`,
+      metadata: { score: quality.score, pass: false, failCount: this.deliveryGateFailCount },
+    })
+    const executor = activeAgents.find((a) => a.id === 'executor')
+    if (executor && this.deliveryGateFailCount < 3) {
+      const reminderMsg: ChatMessage = {
+        id: generateId(),
+        role: 'assistant',
+        agentId: 'system',
+        agentName: '系统',
+        agentAvatar: '🛡️',
+        agentColor: '#f59e0b',
+        content: `⛔ 交付被质量门禁拦截（第 ${this.deliveryGateFailCount} 次）：${quality.reason}。
+
+【精准修复要求 · 禁止整图重画】
+- 不要调用 clear_diagram / draw_flowchart 重新生成整张图
+- 保持当前画布不变，只针对下面列出的具体问题逐个修复
+- 定位到具体节点/连线后，用 update_nodes 移动相关节点的坐标来消除重叠、交叉、穿节点
+- 如果是斜线/路由问题，用 set_edge_routing 切换为正交路由
+- 修复完成后调用 validate_diagram_quality 复检，直到评分 ≥70 且无严重问题
+
+具体问题清单：
+${quality.issues.join('\n')}`,
+        timestamp: Date.now(),
+      }
+      ops.addMessage(reminderMsg)
+      this.repliedAgentsInRound.delete(executor.id)
+      const { messages: latestMessages } = useChatStore.getState()
+      await delay(400)
+      await this.generateAgentResponse(executor, latestMessages, ops, false, true, chainLevel + 1, activeAgents)
+    } else {
+      addLog(sessionId, 'error', '质量门禁：自动修复多次仍未达标，已停止交付', {
+        agentId: agent.id,
+        agentName: agent.name,
+        agentAvatar: agent.avatar,
+        agentColor: agent.color,
+        content: quality.reason,
+      })
+      this.addSystemNoteUnique(
+        ops,
+        `⛔ 已停止交付：自动修复多次仍未能达到硬性质量要求。${quality.reason}`,
+        { avatar: '⚠️', color: '#ef4444', taskCompletion: true }
+      )
+    }
+    return false
+  }
+
   /**
    * 任务完成时自动生成画图总结（非阻塞）
    * 只有开启了画图总结功能才会执行
@@ -395,6 +462,17 @@ class MultiAgentOrchestrator {
 
     // ============= 项目经理 =============
     if (agent.isCoordinator) {
+      // 【修复】优先识别 PM 显式 @指令：PM 明确 @了某个活跃智能体（非自己）时，直接派它。
+      // 之前代码只看"角色 + 历史发言状态"，完全无视 PM 写在 DISPATCH 里的 @执行代理，
+      // 导致"PM @执行代理 → 判定 end → 没人接手，流程中断"。
+      const pmMentionedIds = extractMentionedAgentIds(content, activeAgents)
+      if (pmMentionedIds.length > 0) {
+        const target = activeAgents.find((a) => pmMentionedIds.includes(a.id) && !a.isCoordinator)
+        if (target) {
+          return { type: 'dispatch', agentId: target.id, reason: `PM 显式 @${target.name}，直接派活` }
+        }
+      }
+
       // PM 完成后，按标准流程推下一个：设计 → 执行 → 评审
       // 如果设计助手还没发言 → 调度设计助手
       const designer = activeAgents.find((a) => a.id === 'designer')
@@ -1290,6 +1368,13 @@ ${skillInfoText}${toolsInfo}`
           return n === 'user' || n === '用户'
         })
         if (mentionsUser && agent.isCoordinator) {
+          // 【修复】PM @用户 交付前，先强制执行质量门禁。
+          // 之前这里直接 return 等待用户，跳过了 checkDeliveryQuality，导致"有严重问题仍交付"。
+          const gatePassed = await this.enforceDeliveryGate(agent, ops, chainLevel, activeAgents)
+          if (!gatePassed) {
+            ops.setStreaming(agent.id, false)
+            return
+          }
           console.log(`[orchestrator] ${agent.name} @了用户，设置 waitingForUser=true，暂停调度`)
           useChatStore.getState().setWaitingForUser(true)
           this.addSystemNoteUnique(
@@ -1392,65 +1477,12 @@ ${skillInfoText}${toolsInfo}`
         // nextAction.type === 'end' 或 'none' → 流程结束或暂不调度
         if (nextAction.type === 'end' && agent.isCoordinator) {
           // 交付前质量门禁：硬性要求（节点非空 + 分数≥70 + 无严重问题）不达标就拒绝交付
-          const quality = await this.checkDeliveryQuality()
-          if (!quality.pass) {
-            this.deliveryGateFailCount += 1
-            addLog(sessionId, 'error', '交付被质量门禁拦截', {
-              agentId: agent.id,
-              agentName: agent.name,
-              agentAvatar: agent.avatar,
-              agentColor: agent.color,
-              content: `${quality.reason}${quality.issues.length ? '\n' + quality.issues.join('\n') : ''}`,
-              metadata: { score: quality.score, pass: false, failCount: this.deliveryGateFailCount },
-            })
-
-            const executor = activeAgents.find((a) => a.id === 'executor')
-            if (executor && this.deliveryGateFailCount < 3) {
-              const reminderMsg: ChatMessage = {
-                id: generateId(),
-                role: 'assistant',
-                agentId: 'system',
-                agentName: '系统',
-                agentAvatar: '🛡️',
-                agentColor: '#f59e0b',
-                content: `⛔ 交付被质量门禁拦截（第 ${this.deliveryGateFailCount} 次）：${quality.reason}。
-
-【精准修复要求 · 禁止整图重画】
-- 不要调用 clear_diagram / draw_flowchart 重新生成整张图
-- 保持当前画布不变，只针对下面列出的具体问题逐个修复
-- 定位到具体节点/连线后，用 update_nodes 移动相关节点的坐标来消除重叠、交叉、穿节点
-- 如果是斜线/路由问题，用 set_edge_routing 切换为正交路由
-- 修复完成后调用 validate_diagram_quality 复检，直到评分 ≥70 且无严重问题
-
-具体问题清单：
-${quality.issues.join('\n')}`,
-                timestamp: Date.now(),
-              }
-              ops.addMessage(reminderMsg)
-              this.repliedAgentsInRound.delete(executor.id)
-              const { messages: latestMessages } = useChatStore.getState()
-              await delay(400)
-              await this.generateAgentResponse(executor, latestMessages, ops, false, true, chainLevel + 1, activeAgents)
-            } else {
-              // 达到拦截上限或没有执行代理：不再交付劣质结果，明确上报用户
-              addLog(sessionId, 'error', '质量门禁：自动修复多次仍未达标，已停止交付', {
-                agentId: agent.id,
-                agentName: agent.name,
-                agentAvatar: agent.avatar,
-                agentColor: agent.color,
-                content: quality.reason,
-              })
-              this.addSystemNoteUnique(
-                ops,
-                `⛔ 已停止交付：自动修复多次仍未能达到硬性质量要求。${quality.reason}`,
-                { avatar: '⚠️', color: '#ef4444', taskCompletion: true }
-              )
-            }
+          const gatePassed = await this.enforceDeliveryGate(agent, ops, chainLevel, activeAgents)
+          if (!gatePassed) {
             ops.setStreaming(agent.id, false)
             return
           }
 
-          this.deliveryGateFailCount = 0
           console.log(`[orchestrator] 流程结束：${nextAction.reason}`)
           this.conversationDelivered = true
           this.addSystemNoteUnique(

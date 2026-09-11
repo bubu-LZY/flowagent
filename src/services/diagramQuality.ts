@@ -16,7 +16,7 @@ import type { DiagramCellInfo } from '@/utils/helpers'
 export type QualityIssueSeverity = 'error' | 'warning' | 'info'
 
 export interface QualityIssue {
-  type: 'nodeOverlap' | 'edgeCrossing' | 'edgeThroughNode' | 'labelOverlap' | 'diagonalEdge' | 'parallelOverlap'
+  type: 'nodeOverlap' | 'edgeCrossing' | 'edgeThroughNode' | 'labelOverlap' | 'diagonalEdge' | 'parallelOverlap' | 'edgeTooLong' | 'layoutScatter'
   severity: QualityIssueSeverity
   message: string
   details?: Record<string, any>
@@ -85,6 +85,12 @@ export function validateDiagramQuality(cells: Map<string, DiagramCellInfo>): Qua
 
   // 6. 平行边重合检测
   issues.push(...detectParallelOverlap(edges))
+
+  // 7. 连线过长检测
+  issues.push(...detectEdgeTooLong(edges, vertices))
+
+  // 8. 布局松散 / 空间不均检测
+  issues.push(...detectLayoutScatter(vertices))
 
   // 统计
   const errorCount = issues.filter((i) => i.severity === 'error').length
@@ -328,6 +334,98 @@ function detectParallelOverlap(
   return issues
 }
 
+// ==================== 7. 连线过长 ====================
+
+function detectEdgeTooLong(
+  edges: { id: string; sourceId: string; targetId: string; sx: number; sy: number; tx: number; ty: number }[],
+  vertices: { id: string; x: number; y: number; w: number; h: number }[]
+): QualityIssue[] {
+  const issues: QualityIssue[] = []
+  if (edges.length === 0 || vertices.length === 0) return issues
+
+  // 节点平均半尺寸（w+h）/2，作为"自然距离"基准
+  const avgDim = vertices.reduce((s, v) => s + (v.w + v.h) / 2, 0) / vertices.length
+
+  // 画布包围盒 + 对角线，作为"绝对跨度"基准
+  const minX = Math.min(...vertices.map((v) => v.x))
+  const minY = Math.min(...vertices.map((v) => v.y))
+  const maxX = Math.max(...vertices.map((v) => v.x + v.w))
+  const maxY = Math.max(...vertices.map((v) => v.y + v.h))
+  const diag = Math.sqrt((maxX - minX) ** 2 + (maxY - minY) ** 2)
+  if (diag <= 0) return issues
+
+  for (const e of edges) {
+    const manhattan = Math.abs(e.tx - e.sx) + Math.abs(e.ty - e.sy)
+    const ratioToDim = avgDim > 0 ? manhattan / avgDim : 0
+    const ratioToDiag = manhattan / diag
+
+    const isSevere = ratioToDim > 10 || ratioToDiag > 0.55
+    const isLong = ratioToDim > 6 || ratioToDiag > 0.4
+
+    if (isSevere) {
+      issues.push({
+        type: 'edgeTooLong',
+        severity: 'error',
+        message: `连线「${e.sourceId}→${e.targetId}」过长（约 ${Math.round(manhattan)}px，为节点自然距离的 ${ratioToDim.toFixed(1)} 倍 / 画布对角线的 ${(ratioToDiag * 100).toFixed(0)}%），应缩短布局`,
+        details: { edge: e.id, sourceId: e.sourceId, targetId: e.targetId, manhattan: Math.round(manhattan), ratioToDim: +ratioToDim.toFixed(2), ratioToDiag: +ratioToDiag.toFixed(2) },
+      })
+    } else if (isLong) {
+      issues.push({
+        type: 'edgeTooLong',
+        severity: 'warning',
+        message: `连线「${e.sourceId}→${e.targetId}」偏长（约 ${Math.round(manhattan)}px，为节点自然距离的 ${ratioToDim.toFixed(1)} 倍），建议收紧布局`,
+        details: { edge: e.id, sourceId: e.sourceId, targetId: e.targetId, manhattan: Math.round(manhattan) },
+      })
+    }
+  }
+  return issues
+}
+
+// ==================== 8. 布局松散 / 空间不均 ====================
+
+function detectLayoutScatter(
+  vertices: { id: string; x: number; y: number; w: number; h: number }[]
+): QualityIssue[] {
+  const issues: QualityIssue[] = []
+  if (vertices.length < 4) return issues
+
+  // 每个节点到最近邻居的中心曼哈顿距离
+  const nearest: Array<{ id: string; dist: number; neighbor: string }> = []
+  for (let i = 0; i < vertices.length; i++) {
+    const a = vertices[i]
+    const acx = a.x + a.w / 2
+    const acy = a.y + a.h / 2
+    let minD = Infinity
+    let neighbor = ''
+    for (let j = 0; j < vertices.length; j++) {
+      if (i === j) continue
+      const b = vertices[j]
+      const d = Math.abs(b.x + b.w / 2 - acx) + Math.abs(b.y + b.h / 2 - acy)
+      if (d < minD) {
+        minD = d
+        neighbor = b.id
+      }
+    }
+    nearest.push({ id: a.id, dist: minD, neighbor })
+  }
+
+  const mean = nearest.reduce((s, n) => s + n.dist, 0) / nearest.length
+  if (mean <= 0) return issues
+
+  for (const n of nearest) {
+    // 离群节点：到最近邻居的距离超过平均最近邻距离 2.5 倍 → 形成"空洞/远距"
+    if (n.dist > mean * 2.5) {
+      issues.push({
+        type: 'layoutScatter',
+        severity: 'warning',
+        message: `节点「${n.id}」离群（到最近节点「${n.neighbor}」约 ${Math.round(n.dist)}px，远大于平均最近邻距离 ${Math.round(mean)}px），布局松散/空间利用率不均`,
+        details: { node: n.id, neighbor: n.neighbor, dist: Math.round(n.dist), mean: Math.round(mean) },
+      })
+    }
+  }
+  return issues
+}
+
 // ==================== 辅助函数 ====================
 
 function rectsOverlap(
@@ -434,13 +532,14 @@ function calculateQualityScore(
   errorCount: number,
   warningCount: number
 ): number {
-  // 基础分 100
-  let score = 100
-  // 每个 error 扣 10 分
-  score -= errorCount * 10
-  // 每个 warning 扣 3 分
-  score -= warningCount * 3
-  // 最少 0 分
+  // 【评分规则】存在任一严重问题（error）时，直接落入不合格区（<60 分），
+  // 杜绝"有严重问题还能评出 90 分（优秀）"的矛盾观感。
+  // 严重问题越多、警告越多扣得越狠，但始终压在不及格线以下。
+  if (errorCount > 0) {
+    return Math.max(0, 59 - (errorCount - 1) * 10 - warningCount * 3)
+  }
+  // 无严重问题时：满分 100，每个警告扣 3 分
+  const score = 100 - warningCount * 3
   return Math.max(0, Math.min(100, score))
 }
 
@@ -490,6 +589,8 @@ export function formatQualityReportForAI(report: QualityReport): string {
     labelOverlap: '🔴 标签压节点',
     diagonalEdge: '🔴 斜线连线',
     parallelOverlap: '🟡 平行边重合',
+    edgeTooLong: '🟠 连线过长',
+    layoutScatter: '🟡 布局松散/空间不均',
   }
 
   // 逐条列出所有问题（不截断），并按严重级别编号，方便精准定位
@@ -512,7 +613,8 @@ export function formatQualityReportForAI(report: QualityReport): string {
   lines.push('1. 节点重叠 / 连线穿节点 / 标签压节点 / 连线交叉 → 用 update_nodes 移动相关节点的 x/y 坐标，把它们拉开、错位，使连线避开节点。')
   lines.push('2. 斜线连线 → 用 set_edge_routing 切换为正交路由（orthogonal），不要改节点位置。')
   lines.push('3. 平行边重合 → 用 update_nodes 微调相关节点的坐标，让两条边错开。')
-  lines.push('4. 修复后再次调用 validate_diagram_quality 复检，直到无严重问题且评分达标。')
+  lines.push('4. 连线过长 / 布局松散 → 用 update_nodes 把离群节点向主流程靠拢、收紧布局，缩短不必要过长的连线。')
+  lines.push('5. 修复后再次调用 validate_diagram_quality 复检，直到无严重问题且评分达标。')
 
   return lines.join('\n')
 }

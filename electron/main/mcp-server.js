@@ -913,7 +913,7 @@ async function handleJsonRpcRequest(body) {
           },
           serverInfo: {
             name: 'flowchart-agent-mcp',
-            version: '0.5.3',
+            version: '0.5.4',
           },
         },
       }
@@ -1063,7 +1063,7 @@ function handleSSE(req, res) {
 
   // 发送初始事件
   res.write(`event: endpoint\ndata: /messages?sessionId=${sessionId}\n\n`)
-  res.write(`event: hello\ndata: ${JSON.stringify({ serverInfo: { name: 'flowchart-agent-mcp', version: '0.5.3' } })}\n\n`)
+  res.write(`event: hello\ndata: ${JSON.stringify({ serverInfo: { name: 'flowchart-agent-mcp', version: '0.5.4' } })}\n\n`)
 
   sseClients.set(sessionId, res)
 
@@ -1196,7 +1196,7 @@ function startServer(port = DEFAULT_PORT) {
       res.end(JSON.stringify({
         status: 'ok',
         service: 'flowchart-agent-mcp',
-        version: '0.5.3',
+        version: '0.5.4',
         uptime: process.uptime(),
       }))
       return
