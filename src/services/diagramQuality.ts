@@ -652,3 +652,114 @@ export function formatQualityReportForAI(report: QualityReport): string {
 
   return lines.join('\n')
 }
+
+/**
+ * 坐标级修复建议：把质检问题换算成「把节点 X 移到 (x, y)」的具体指令。
+ * 背景：布局类问题（连线过长/穿节点/离群/重叠）本质是几十到几百像素的坐标问题，
+ * 但之前只给问题描述不给坐标，执行代理只能盲猜，常常把节点移过头或来回横跳（实测问题）。
+ * 这里用几何计算直接给出建议落点，AI 可在此基础上微调。
+ */
+export function suggestNodeFixes(
+  report: { issues?: QualityIssue[] },
+  cells: Map<string, DiagramCellInfo>,
+  maxSuggestions = 6
+): string[] {
+  const suggestions: string[] = []
+  const vertices = new Map<string, { x: number; y: number; w: number; h: number }>()
+  const edges = new Map<string, { sourceId?: string; targetId?: string }>()
+  for (const c of cells.values()) {
+    if (c.type === 'vertex') {
+      vertices.set(c.id, { x: c.x ?? 0, y: c.y ?? 0, w: c.width ?? 160, h: c.height ?? 60 })
+    } else if (c.type === 'edge') {
+      edges.set(c.id, { sourceId: c.sourceId, targetId: c.targetId })
+    }
+  }
+
+  const center = (v: { x: number; y: number; w: number; h: number }) => ({
+    x: v.x + v.w / 2,
+    y: v.y + v.h / 2,
+  })
+  const nearestNeighborDist = (id: string): number => {
+    const a = vertices.get(id)
+    if (!a) return Infinity
+    const ac = center(a)
+    let minD = Infinity
+    for (const [bid, b] of vertices) {
+      if (bid === id) continue
+      const bc = center(b)
+      const d = Math.abs(bc.x - ac.x) + Math.abs(bc.y - ac.y)
+      if (d < minD) minD = d
+    }
+    return minD
+  }
+  const fmt = (n: number) => Math.round(n)
+  const push = (nodeId: string, x: number, y: number, why: string) => {
+    suggestions.push(`- 节点「${nodeId}」→ 移至 (x=${fmt(x)}, y=${fmt(y)})（${why}）`)
+  }
+
+  for (const issue of report.issues || []) {
+    if (suggestions.length >= maxSuggestions) break
+    const d = issue.details || {}
+
+    if (issue.type === 'edgeTooLong') {
+      const s = vertices.get(d.sourceId)
+      const t = vertices.get(d.targetId)
+      if (!s || !t) continue
+      // 离群端 = 最近邻距离更大的那个（它才是"漂在外面"的节点）
+      const outlierId = nearestNeighborDist(d.sourceId) >= nearestNeighborDist(d.targetId) ? d.sourceId : d.targetId
+      const otherId = outlierId === d.sourceId ? d.targetId : d.sourceId
+      const out = vertices.get(outlierId)!
+      const other = vertices.get(otherId)!
+      const oc = center(other)
+      const outc = center(out)
+      const dx = Math.abs(outc.x - oc.x)
+      const dy = Math.abs(outc.y - oc.y)
+      if (dy >= dx) {
+        // 纵向主轴：紧贴另一端下方/上方
+        const below = outc.y > oc.y
+        const y = below ? other.y + other.h + 80 : other.y - out.h - 80
+        push(outlierId, oc.x - out.w / 2, y, `紧邻「${otherId}」消除过长连线`)
+      } else {
+        const right = outc.x > oc.x
+        const x = right ? other.x + other.w + 80 : other.x - out.w - 80
+        push(outlierId, x, oc.y - out.h / 2, `紧邻「${otherId}」消除过长连线`)
+      }
+    } else if (issue.type === 'edgeThroughNode') {
+      const edge = edges.get(d.edge)
+      const v = vertices.get(d.node)
+      const s = edge?.sourceId ? vertices.get(edge.sourceId) : undefined
+      const t = edge?.targetId ? vertices.get(edge.targetId) : undefined
+      if (!v || !s || !t) continue
+      const sc = center(s)
+      const tc = center(t)
+      const vertical = Math.abs(tc.y - sc.y) >= Math.abs(tc.x - sc.x)
+      const vc = center(v)
+      if (vertical) {
+        // 纵向连线穿过节点 → 节点横向让开连线通道
+        const edgeX = (sc.x + tc.x) / 2
+        const dir = vc.x >= edgeX ? 1 : -1
+        push(d.node, v.x + dir * (v.w + 60), v.y, `横向让开连线「${edge?.sourceId}→${edge?.targetId}」`)
+      } else {
+        const edgeY = (sc.y + tc.y) / 2
+        const dir = vc.y >= edgeY ? 1 : -1
+        push(d.node, v.x, v.y + dir * (v.h + 60), `纵向让开连线「${edge?.sourceId}→${edge?.targetId}」`)
+      }
+    } else if (issue.type === 'nodeOverlap') {
+      const b = vertices.get(d.nodeB)
+      const a = vertices.get(d.nodeA)
+      if (!a || !b) continue
+      // 把 B 顺当前相对方向推开：至少脱离 A 并留 40px 间距
+      const ac = center(a)
+      const bc = center(b)
+      const dir = bc.y >= ac.y ? 1 : -1
+      push(d.nodeB, b.x, a.y + dir * (a.h + 40) + (dir < 0 ? -b.h : 0), `脱离与「${d.nodeA}」的重叠`)
+    } else if (issue.type === 'layoutScatter') {
+      const v = vertices.get(d.node)
+      const n = vertices.get(d.neighbor)
+      if (!v || !n) continue
+      push(d.node, n.x, n.y + n.h + 80, `回到「${d.neighbor}」附近消除离群`)
+    }
+  }
+
+  return suggestions
+}

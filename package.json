@@ -1,6 +1,6 @@
 {
   "name": "flowchart-agent",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "多智能体协作的 draw.io 流程图工具",
   "private": true,
   "author": "卓阳大大",

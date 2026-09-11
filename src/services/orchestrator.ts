@@ -5,7 +5,7 @@ import { useSessionStore } from '@/store/sessionStore'
 import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay, parseMentions } from '@/utils/helpers'
 import { callAI, callAIJson } from './aiService'
 import { addLog } from './logService'
-import { validateDiagramQuality, formatQualityReportForAI } from './diagramQuality'
+import { validateDiagramQuality, formatQualityReportForAI, suggestNodeFixes } from './diagramQuality'
 
 // 画布「写入类」工具：调用过这些才算执行代理真正动了画布（读画布/计算器等非写入工具不算）。
 // 统一常量供多处判定共用，避免新增画布工具时漏改导致「执行代理是否真干活」判定失真或静默终止。
@@ -269,6 +269,8 @@ class MultiAgentOrchestrator {
   private reviewerFailCount = 0
   // 交付质量门禁连续拦截次数（PM 拍板交付被拦 +1，超过上限停止交付防死循环）
   private deliveryGateFailCount = 0
+  // 用户中途插话后已被重定向过的用户消息 id（同一条消息只重定向一次，防无限循环）
+  private lastUserReqRedirectId: string | null = null
 
   // 【修复 P0-4】会话级状态（之前是模块级全局变量，导致跨会话污染）
   // "任务交付已完成" 会话级锁：一旦 PM 拍板交付，置 true，之后任何新用户输入
@@ -291,6 +293,8 @@ class MultiAgentOrchestrator {
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
       this.reviewerFailCount = 0
+      this.deliveryGateFailCount = 0
+      this.lastUserReqRedirectId = null
       // 重置 chatStore 中的会话级状态（轮数、等待用户、停止状态）
       // 这些状态存在全局 store 里，切会话必须重置，否则新会话会继承旧会话的轮数
       useChatStore.getState().resetRound()
@@ -362,7 +366,7 @@ class MultiAgentOrchestrator {
   }
 
   // 交付前质量门禁：节点非空 + 质量分数达标 + 无严重问题，否则拒绝交付
-  private async checkDeliveryQuality(): Promise<{ pass: boolean; score: number; reason: string; issues: string[] }> {
+  private async checkDeliveryQuality(): Promise<{ pass: boolean; score: number; reason: string; issues: string[]; suggestions?: string[] }> {
     try {
       const win = window as any
       if (!win.drawioApi?.getXml) {
@@ -387,9 +391,10 @@ class MultiAgentOrchestrator {
           score: report.score,
           reason: `质量评分 ${report.score}/100 未达标（需 ≥${QUALITY_THRESHOLD} 且无严重问题），存在 ${report.errorCount} 个严重问题、${report.warningCount} 个警告、${report.infoCount} 个提示`,
           issues: allIssues,
+          suggestions: suggestNodeFixes(report, cells),
         }
       }
-      return { pass: true, score: report.score, reason: `质量评分 ${report.score}/100 达标`, issues: [] }
+      return { pass: true, score: report.score, reason: `质量评分 ${report.score}/100 达标`, issues: [], suggestions: [] }
     } catch (e: any) {
       return { pass: false, score: 0, reason: `质量校验异常：${e.message || '未知错误'}`, issues: [] }
     }
@@ -434,16 +439,21 @@ class MultiAgentOrchestrator {
 
 【未通过的问题清单】
 ${quality.issues.join('\n')}
-
+${quality.suggestions?.length ? `
+【坐标级修复建议（几何计算结果，可直接作为 update_nodes 参数）】
+${quality.suggestions.join('\n')}
+建议坐标是计算出的落点，应用后必须调 validate_diagram_quality 复检；若评分下降，把该节点移回原坐标并换方向微调。
+` : ''}
 【历史快照】
 每次打回前的产物都已自动保存到「版本历史」，可在画布右侧「版本历史」面板预览、对比、恢复。
 
 【精准修复要求 · 禁止整图重画】
 - 不要调用 clear_diagram / draw_flowchart 重新生成整张图
 - 保持当前画布不变，只针对上面列出的具体问题逐个修复
-- 定位到具体节点/连线后，用 update_nodes 移动相关节点坐标，消除重叠、交叉、穿节点
+- 定位到具体节点/连线后，用 update_nodes 移动相关节点坐标（优先参考上面的坐标级建议），消除重叠、交叉、穿节点
 - 如果是斜线/路由问题，用 set_edge_routing 切换为正交路由
-- 修复完成后调用 validate_diagram_quality 复检，直到评分 ≥70 且无严重问题`,
+- 每次 update_nodes 后调 validate_diagram_quality 复检：评分提高则保留；评分下降立即回退该次修改换方向再试
+- 修复完成后复检，直到评分 ≥70 且无严重问题`,
         timestamp: Date.now(),
       }
       ops.addMessage(reminderMsg)
@@ -1620,6 +1630,53 @@ ${skillInfoText}${toolsInfo}`
           return n === 'user' || n === '用户'
         })
         if (mentionsUser && agent.isCoordinator) {
+          // 【护栏】用户中途插话后，若尚无任何执行侧智能体（设计/执行/评审）针对新消息工作过，
+          // 禁止 PM 直接 @用户 交付。之前 PM 会在新需求未落实时就尝试交付，
+          // 新需求被无声跳过，最终由执行代理在无方案的情况下瞎接（实测：插话"使用 GitHub 规范绘图"后 PM 直接交付被门禁拦）。
+          const msgs = useChatStore.getState().messages
+          const lastUserMsg = [...msgs].reverse().find((m) => m.role === 'user')
+          const lastWorkerMsg = [...msgs].reverse().find(
+            (m) => m.role === 'assistant' && m.agentId && m.agentId !== 'project-manager' && m.agentId !== 'system'
+          )
+          if (
+            lastUserMsg && lastWorkerMsg && lastUserMsg.timestamp > lastWorkerMsg.timestamp &&
+            this.lastUserReqRedirectId !== lastUserMsg.id
+          ) {
+            this.lastUserReqRedirectId = lastUserMsg.id
+            addLog(sessionId, 'system', 'PM 交付被拦截：用户中途插入的新需求尚未落实', {
+              agentId: 'system',
+              agentName: '系统',
+              agentAvatar: '🛑',
+              agentColor: '#ef4444',
+              content: '检测到用户在任务中途插入了新消息且尚无智能体处理，已阻止项目经理直接交付，要求其先调度智能体落实',
+            })
+            const redirectMsg: ChatMessage = {
+              id: generateId(),
+              role: 'assistant',
+              agentId: 'system',
+              agentName: '系统',
+              agentAvatar: '🛑',
+              agentColor: '#ef4444',
+              content: `⚠️ 交付被系统拦截：检测到用户在任务中途插入了新消息（「${(lastUserMsg.content || '').slice(0, 100)}」），但尚未有任何智能体落实它。
+项目经理，请先消化这条新需求并 DISPATCH 对应智能体处理：需要改设计方案就派 @设计助手，需要改图就派 @执行代理，需要重新验收就派 @评审员。
+严禁在新需求未落实前 @用户 交付。`,
+              timestamp: Date.now(),
+            }
+            ops.addMessage(redirectMsg)
+            this.repliedAgentsInRound.delete(agent.id)
+            await delay(400)
+            await this.generateAgentResponse(
+              agent,
+              useChatStore.getState().messages,
+              ops,
+              false,
+              true,
+              chainLevel,
+              activeAgents
+            )
+            ops.setStreaming(agent.id, false)
+            return
+          }
           // 【修复】PM @用户 交付前，先强制执行质量门禁。
           // 之前这里直接 return 等待用户，跳过了 checkDeliveryQuality，导致"有严重问题仍交付"。
           const gatePassed = await this.enforceDeliveryGate(agent, ops, chainLevel, activeAgents)

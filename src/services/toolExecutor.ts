@@ -378,8 +378,9 @@ async function executeToolInternal(
       }
     }
 
-    // 全局停止检查
-    if (useChatStore.getState().isStopped) {
+    // 全局停止检查（MCP 系统调用除外：MCP 是外部新发起的独立意图，
+    // 前台界面遗留的停止状态属于交互会话，不应污染后台 MCP 调用——实测跨会话状态污染 bug）
+    if (agentId !== 'mcp-system' && useChatStore.getState().isStopped) {
       return {
         success: false,
         cancelled: true,
@@ -1637,9 +1638,14 @@ async function executeUpdateNodes(args: any) {
 
     const counts = await writeCells(cells)
     const allWarnings = [...warnings, ...(counts.lintWarnings || [])]
+    // 警告标注为中间态参考：实测执行代理会把单次移动后的过渡警告当成新问题，
+    // 来回横跳、把节点移回原位（越改越乱）。以 validate_diagram_quality 复检评分为准。
+    const advisoryNote = allWarnings.length
+      ? '。【提示】以上警告来自本次移动后的中间状态，仅供方向参考，不必立即逐条响应；请调 validate_diagram_quality 复检，评分提高则保留本次修改，评分下降则回退'
+      : ''
     return {
       success: true,
-      message: `批量修改成功：更新 ${updated} 个节点，画布现有 ${counts.nodeCount} 个节点、${counts.edgeCount} 条连线${allWarnings.length ? '。注意：' + allWarnings.join('；') : ''}`,
+      message: `批量修改成功：更新 ${updated} 个节点，画布现有 ${counts.nodeCount} 个节点、${counts.edgeCount} 条连线${allWarnings.length ? '。注意：' + allWarnings.join('；') : ''}${advisoryNote}`,
       updated,
       nodeCount: counts.nodeCount,
       edgeCount: counts.edgeCount,

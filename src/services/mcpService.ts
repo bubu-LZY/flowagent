@@ -12,7 +12,7 @@ import { useSessionStore } from '@/store/sessionStore'
 import { multiAgentOrchestrator } from './orchestrator'
 import { executeTool } from './toolExecutor'
 import { generateId } from '@/utils/helpers'
-import type { McpTask } from '@/types'
+import type { McpTask, ChatMessage } from '@/types'
 
 // ========== MCP 任务状态管理 ==========
 // 存在模块级变量里，同时持久化到 sessionStore 的 meta 中
@@ -262,30 +262,58 @@ async function handleDeleteSession(args: any) {
 }
 
 async function handleSendChatMessage(args: any) {
-  const { message, sessionId, awaitCompletion = false, timeout = 120 } = args
+  const { message, sessionId, awaitCompletion = false, timeout = 120, taskName } = args
   if (!message) throw new Error('message 不能为空')
 
-  // 如果指定了不同的会话，需要切换过去（聊天操作需要在目标会话中）
   const sessionStore = useSessionStore.getState()
   const originalSessionId = sessionStore.currentSessionId
-  let switched = false
 
-  if (sessionId && sessionId !== originalSessionId) {
-    sessionStore.switchSession(sessionId)
+  // 【修复】未指定会话时创建独立后台会话，绝不在用户前台会话上执行：
+  // 之前不传 sessionId 会直接在当前前台会话 addMessage 并启动编排器，
+  // 智能体消息会混入用户正在查看的会话，且多智能体长时间流式输出曾导致渲染进程白屏
+  let targetSessionId = sessionId
+  if (!targetSessionId) {
+    const title = taskName || `MCP 对话 ${new Date().toLocaleTimeString()}`
+    const newSession = sessionStore.createSession(title)
+    targetSessionId = newSession.id
+  }
+
+  let switched = false
+  if (targetSessionId !== originalSessionId) {
+    sessionStore.switchSession(targetSessionId)
     switched = true
     // 等一下让状态同步
     await new Promise(r => setTimeout(r, 200))
   }
 
-  const { addMessage } = useChatStore.getState()
+  const { addMessage, updateMessage, appendToMessage, appendThinkingToMessage, setStreaming } = useChatStore.getState()
+  // MCP 消息是外部新发起的用户意图，等价于用户在界面手动发送（UI 发送会 resetStopped）。
+  // 之前不重置，前台遗留的 isStopped=true 会拦截后台智能体调度和工具执行（跨会话状态污染实测 bug）
+  useChatStore.getState().resetStopped()
   await addMessage(message as any)
+  // 【修复】之前只把消息塞进聊天记录、从未启动多智能体调度（multiAgentOrchestrator 导入了但没调用），
+  // awaitCompletion=true 时必然等到超时。现在与 UI 发送一致地启动编排器。
+  multiAgentOrchestrator.startConversation(message as ChatMessage, {
+    addMessage,
+    updateMessage,
+    appendToMessage,
+    appendThinkingToMessage,
+    setStreaming,
+  })
 
   if (!awaitCompletion) {
-    // 如果切换过，切回去
+    // 【修复】不能立即切回原会话：chatStore.messages 绑定当前活跃会话（ChatPanel 自动保存到
+    // currentSessionId），编排器还在流式写入时切回会把智能体消息保存进用户前台会话（跨会话污染）。
+    // 改为后台监视，编排器空闲后再切回原会话
     if (switched && originalSessionId) {
-      sessionStore.switchSession(originalSessionId)
+      watchAndRestoreSession(originalSessionId, timeout)
     }
-    return { success: true, status: 'processing', message: '消息已发送，智能体正在处理' }
+    return {
+      success: true,
+      status: 'processing',
+      sessionId: targetSessionId,
+      message: '消息已发送，智能体正在后台会话中处理',
+    }
   }
 
   // 等待完成（带超时）
@@ -297,12 +325,15 @@ async function handleSendChatMessage(args: any) {
 
       if (elapsed > timeout) {
         clearInterval(checkInterval)
-        if (switched && originalSessionId) {
+        // 【修复】超时切回前必须确认编排器已空闲：仍流式时切回会把智能体消息
+        // 保存进用户前台会话。仍在运行则留在后台会话，由客户端凭 sessionId 继续查询
+        if (switched && originalSessionId && streamingAgents.length === 0) {
           sessionStore.switchSession(originalSessionId)
         }
         resolve({
           success: true,
           status: 'timeout',
+          sessionId: targetSessionId,
           message: `等待超时（${timeout}秒），任务仍在后台进行中`,
           lastMessages: messages.slice(-5).map(m => ({
             id: m.id,
@@ -334,6 +365,7 @@ async function handleSendChatMessage(args: any) {
             resolve({
               success: true,
               status: 'completed',
+              sessionId: targetSessionId,
               message: '任务完成',
               lastMessages,
               elapsedSeconds: Math.round(elapsed),
@@ -343,6 +375,31 @@ async function handleSendChatMessage(args: any) {
       }
     }, 1000)
   })
+}
+
+// 后台监视编排器状态：空闲（无流式输出）后切回原会话，避免 MCP 后台任务长期占用前台显示。
+// 超时上限内仍未空闲则放弃切回（数据安全优先，用户可手动切换）
+function watchAndRestoreSession(originalSessionId: string, timeoutSeconds: number) {
+  const startTime = Date.now()
+  let idleTicks = 0
+  const timer = setInterval(() => {
+    const { streamingAgents } = useChatStore.getState()
+    if (streamingAgents.length === 0) {
+      idleTicks++
+      // 连续 2 秒无流式，二次确认后切回，避免轮次间隙误判
+      if (idleTicks >= 2) {
+        clearInterval(timer)
+        if (useSessionStore.getState().currentSessionId !== originalSessionId) {
+          useSessionStore.getState().switchSession(originalSessionId)
+        }
+      }
+    } else {
+      idleTicks = 0
+      if ((Date.now() - startTime) / 1000 > timeoutSeconds) {
+        clearInterval(timer)
+      }
+    }
+  }, 1000)
 }
 
 async function handleGetChatMessages(args: any) {
@@ -472,7 +529,7 @@ async function handleGetSystemInfo() {
     success: true,
     info: {
       appName: 'Flowchart Agent',
-      version: '0.6.1',
+      version: '0.6.2',
       sessionCount: sessions.length,
       currentSessionId,
       currentSessionMessageCount: messages.length,
