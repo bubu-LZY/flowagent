@@ -63,6 +63,7 @@ interface LayoutEdge {
   style: string
   source: string
   target: string
+  isBack?: boolean // 是否是回环边（重试循环/回退等），分层时忽略，坐标分配后走侧边距
 }
 
 /**
@@ -114,6 +115,10 @@ export function layoutDiagram(
 
   if (nodes.size === 0) return cells
 
+  // 识别回环边并标记（分层、虚节点、坐标分配都会用到）
+  const backEdgeIds = identifyBackEdges(nodes, edges)
+  for (const e of edges) e.isBack = backEdgeIds.has(e.id)
+
   // 2. 分层（最长路径算法）
   assignLayers(nodes, edges)
 
@@ -135,7 +140,7 @@ export function layoutDiagram(
   }
 
   // 6. 分配坐标
-  assignCoordinates(nodes, opts)
+  assignCoordinates(nodes, edges, opts)
 
   // 7. 平行边处理
   handleParallelEdges(nodes, edges, opts)
@@ -177,46 +182,73 @@ export function layoutDiagram(
 
 // ==================== 1. 分层 ====================
 
-function assignLayers(nodes: Map<string, LayoutNode>, edges: LayoutEdge[]): void {
-  const indegree = new Map<string, number>()
-  for (const [id, node] of nodes) {
-    indegree.set(id, node.incoming.length)
+/**
+ * 识别回环边（back edges）：DFS 中遇到"灰色"（仍在递归栈中）节点的边。
+ * 回环边（如重试循环、多轮收敛的回退边）在分层时应暂时忽略，
+ * 否则会把环内节点全部堆到最后一层，导致连线过长、横穿节点。
+ */
+function identifyBackEdges(nodes: Map<string, LayoutNode>, edges: LayoutEdge[]): Set<string> {
+  const backEdges = new Set<string>()
+  const state = new Map<string, 0 | 1 | 2>() // 0=未访问, 1=在栈中, 2=已完成
+
+  // source -> edgeId 列表索引；edgeId -> target 快速查找
+  const outEdgeIndex = new Map<string, string[]>()
+  const edgeTarget = new Map<string, string>()
+  for (const e of edges) {
+    if (!outEdgeIndex.has(e.source)) outEdgeIndex.set(e.source, [])
+    outEdgeIndex.get(e.source)!.push(e.id)
+    edgeTarget.set(e.id, e.target)
   }
 
-  const queue: string[] = []
-  for (const [id, deg] of indegree) {
-    if (deg === 0) {
-      queue.push(id)
-      nodes.get(id)!.layer = 0
-    }
-  }
-
-  const visited = new Set<string>()
-  while (queue.length > 0) {
-    const current = queue.shift()!
-    if (visited.has(current)) continue
-    visited.add(current)
-
-    const node = nodes.get(current)!
-    for (const nextId of node.outgoing) {
-      const next = nodes.get(nextId)
-      if (next) {
-        next.layer = Math.max(next.layer, node.layer + 1)
-        const deg = (indegree.get(nextId) || 1) - 1
-        indegree.set(nextId, deg)
-        if (deg <= 0) queue.push(nextId)
+  const dfs = (id: string, stack: Set<string>): void => {
+    state.set(id, 1)
+    stack.add(id)
+    const outIds = outEdgeIndex.get(id) || []
+    for (const edgeId of outIds) {
+      const nextId = edgeTarget.get(edgeId)
+      if (!nextId || !nodes.has(nextId)) continue
+      const st = state.get(nextId) ?? 0
+      if (st === 0) {
+        dfs(nextId, stack)
+      } else if (st === 1 && stack.has(nextId)) {
+        // nextId 仍在当前递归路径上（是祖先/自身），这条边是回环边
+        backEdges.add(edgeId)
       }
     }
+    stack.delete(id)
+    state.set(id, 2)
   }
 
-  let maxLayer = 0
-  for (const node of nodes.values()) {
-    if (node.layer > maxLayer) maxLayer = node.layer
+  for (const id of nodes.keys()) {
+    if ((state.get(id) ?? 0) === 0) dfs(id, new Set())
   }
-  for (const [id, node] of nodes) {
-    if (!visited.has(id)) {
-      node.layer = maxLayer + 1
+  return backEdges
+}
+
+/**
+ * 分层：排除回环边后，用最长路径算法计算每层。
+ * 相比原 Kahn 拓扑排序，能正确处理分支、汇聚；回环边不影响层数。
+ */
+function assignLayers(nodes: Map<string, LayoutNode>, edges: LayoutEdge[]): void {
+  const layer = new Map<string, number>()
+  for (const id of nodes.keys()) layer.set(id, 0)
+
+  for (let iter = 0; iter < nodes.size; iter++) {
+    let changed = false
+    for (const e of edges) {
+      if (e.isBack) continue
+      const s = layer.get(e.source) ?? 0
+      const t = layer.get(e.target) ?? 0
+      if (s + 1 > t) {
+        layer.set(e.target, s + 1)
+        changed = true
+      }
     }
+    if (!changed) break
+  }
+
+  for (const [id, node] of nodes) {
+    node.layer = layer.get(id) ?? 0
   }
 }
 
@@ -234,6 +266,7 @@ function insertDummyNodes(nodes: Map<string, LayoutNode>, edges: LayoutEdge[]): 
   const edgesToReplace: LayoutEdge[] = []
 
   for (const edge of edges) {
+    if (edge.isBack) continue // 回环边不走虚节点，坐标分配后单独路由
     const src = nodes.get(edge.source)
     const tgt = nodes.get(edge.target)
     if (!src || !tgt) continue
@@ -634,7 +667,16 @@ function countLayerPairCrossings(
 
 // ==================== 6. 坐标分配 ====================
 
-function assignCoordinates(nodes: Map<string, LayoutNode>, opts: Required<LayoutOptions>): void {
+function assignCoordinates(nodes: Map<string, LayoutNode>, edges: LayoutEdge[], opts: Required<LayoutOptions>): void {
+  // 收集回环边涉及的节点：把它们靠右排，让回环边走右侧边距，避免横穿主流程竖列
+  const backInvolved = new Set<string>()
+  for (const e of edges) {
+    if (e.isBack) {
+      backInvolved.add(e.source)
+      backInvolved.add(e.target)
+    }
+  }
+
   const layers: LayoutNode[][] = []
   for (const node of nodes.values()) {
     if (node.isDummy) continue // 虚节点不参与真实坐标计算
@@ -642,32 +684,39 @@ function assignCoordinates(nodes: Map<string, LayoutNode>, opts: Required<Layout
     layers[node.layer].push(node)
   }
 
-  // 每层按 order 排序
+  // 每层排序：回环边节点靠右，其余按 order。回环边节点聚到右侧，便于其连线走侧边距
   for (const layer of layers) {
-    if (layer) {
-      layer.sort((a, b) => a.order - b.order)
-    }
+    if (!layer) continue
+    layer.sort((a, b) => {
+      const aBack = backInvolved.has(a.id) ? 1 : 0
+      const bBack = backInvolved.has(b.id) ? 1 : 0
+      if (aBack !== bBack) return aBack - bBack
+      return a.order - b.order
+    })
   }
 
-  // 计算每层总宽度（按层索引对齐，防止层有空洞时 push 顺序与 li 错位）
+  // 计算每层宽度与最大高度（按层索引对齐，防止层有空洞时 push 顺序与 li 错位）
   const layerWidths: number[] = []
+  const layerHeights: number[] = []
   let maxLayerWidth = 0
   for (let li = 0; li < layers.length; li++) {
     const layer = layers[li]
     if (!layer) {
       layerWidths[li] = 0
+      layerHeights[li] = 0
       continue
     }
     const totalWidth = layer.reduce((sum, n) => sum + n.width, 0)
     const gaps = (layer.length - 1) * opts.nodeGap
-    const w = totalWidth + gaps
-    layerWidths[li] = w
-    if (w > maxLayerWidth) maxLayerWidth = w
+    layerWidths[li] = totalWidth + gaps
+    layerHeights[li] = Math.max(...layer.map((n) => n.height))
+    if (layerWidths[li] > maxLayerWidth) maxLayerWidth = layerWidths[li]
   }
 
   const startX = 60
   const startY = 60
 
+  let currentY = startY
   for (let li = 0; li < layers.length; li++) {
     const layer = layers[li]
     if (!layer) continue
@@ -679,13 +728,14 @@ function assignCoordinates(nodes: Map<string, LayoutNode>, opts: Required<Layout
     for (const node of layer) {
       if (opts.direction === 'TB') {
         node.x = currentX
-        node.y = startY + li * (opts.nodeHeight + opts.layerGap)
+        node.y = currentY
       } else {
-        node.x = startY + li * (opts.nodeWidth + opts.layerGap)
+        node.x = currentY
         node.y = currentX
       }
       currentX += node.width + opts.nodeGap
     }
+    currentY += (layerHeights[li] || opts.nodeHeight) + opts.layerGap
   }
 }
 

@@ -354,8 +354,10 @@ class MultiAgentOrchestrator {
       content: `${quality.reason}${quality.issues.length ? '\n' + quality.issues.join('\n') : ''}`,
       metadata: { score: quality.score, pass: false, failCount: this.deliveryGateFailCount },
     })
+    // 最多自动修复 2 轮：打回 2 次后仍不达标即停止，交由项目经理/用户拍板，防止无限循环修改
+    const MAX_AUTO_REPAIR_ROUNDS = 2
     const executor = activeAgents.find((a) => a.id === 'executor')
-    if (executor && this.deliveryGateFailCount < 3) {
+    if (executor && this.deliveryGateFailCount <= MAX_AUTO_REPAIR_ROUNDS) {
       const reminderMsg: ChatMessage = {
         id: generateId(),
         role: 'assistant',
@@ -363,17 +365,21 @@ class MultiAgentOrchestrator {
         agentName: '系统',
         agentAvatar: '🛡️',
         agentColor: '#f59e0b',
-        content: `⛔ 交付被质量门禁拦截（第 ${this.deliveryGateFailCount} 次）：${quality.reason}。
+        content: `⛔ 第 ${this.deliveryGateFailCount} 次打回（最多自动修复 ${MAX_AUTO_REPAIR_ROUNDS} 轮）
+项目经理提交的产物未通过质检：${quality.reason}
+
+【未通过的问题清单】
+${quality.issues.join('\n')}
+
+【历史快照】
+每次打回前的产物都已自动保存到「版本历史」，可在画布右侧「版本历史」面板预览、对比、恢复。
 
 【精准修复要求 · 禁止整图重画】
 - 不要调用 clear_diagram / draw_flowchart 重新生成整张图
-- 保持当前画布不变，只针对下面列出的具体问题逐个修复
-- 定位到具体节点/连线后，用 update_nodes 移动相关节点的坐标来消除重叠、交叉、穿节点
+- 保持当前画布不变，只针对上面列出的具体问题逐个修复
+- 定位到具体节点/连线后，用 update_nodes 移动相关节点坐标，消除重叠、交叉、穿节点
 - 如果是斜线/路由问题，用 set_edge_routing 切换为正交路由
-- 修复完成后调用 validate_diagram_quality 复检，直到评分 ≥70 且无严重问题
-
-具体问题清单：
-${quality.issues.join('\n')}`,
+- 修复完成后调用 validate_diagram_quality 复检，直到评分 ≥70 且无严重问题`,
         timestamp: Date.now(),
       }
       ops.addMessage(reminderMsg)
@@ -382,16 +388,24 @@ ${quality.issues.join('\n')}`,
       await delay(400)
       await this.generateAgentResponse(executor, latestMessages, ops, false, true, chainLevel + 1, activeAgents)
     } else {
-      addLog(sessionId, 'error', '质量门禁：自动修复多次仍未达标，已停止交付', {
+      addLog(sessionId, 'error', '质量门禁：自动修复已达上限，已停止交付', {
         agentId: agent.id,
         agentName: agent.name,
         agentAvatar: agent.avatar,
         agentColor: agent.color,
         content: quality.reason,
+        metadata: { failCount: this.deliveryGateFailCount },
       })
       this.addSystemNoteUnique(
         ops,
-        `⛔ 已停止交付：自动修复多次仍未能达到硬性质量要求。${quality.reason}`,
+        `🛑 已停止自动修复：已打回 ${this.deliveryGateFailCount} 次，超过上限（最多自动修复 ${MAX_AUTO_REPAIR_ROUNDS} 轮），本次未交付。
+
+未通过原因：${quality.reason}
+
+您可以：
+1. 在画布右侧「版本历史」选择一个历史快照预览/恢复，避免丢失中途的可用版本；
+2. 手动 @执行代理 并给出更明确、具体的修复指令；
+3. 或重新发起任务。`,
         { avatar: '⚠️', color: '#ef4444', taskCompletion: true }
       )
     }

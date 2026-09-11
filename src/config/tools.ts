@@ -389,6 +389,21 @@ export const builtinTools: ToolDefinition[] = [
     },
   },
   {
+    id: 'get_layout_templates',
+    zhName: '查询布局模板库',
+    name: 'get_layout_templates',
+    description: 'Get built-in high-quality layout templates (vertical main flow, zigzag two-column, horizontal role chain) with concrete coordinates to reference before drawing.',
+    zhDescription: '获取内置优秀布局模板（纵向主流程/两列Z字/横向角色链），含具体坐标范例，供画图前选型参照，避免横线穿节点、连线过长。',
+    type: 'custom',
+    source: 'builtin',
+    enabled: true,
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+  {
     id: 'set_edge_routing',
     zhName: '设置连线路由模式',
     name: 'set_edge_routing',

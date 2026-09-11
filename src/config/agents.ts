@@ -85,12 +85,33 @@ QUALITY RULES (在设计阶段就考虑好，避免后续返工)
 - Loop-back edges route through side margins, never through the main flow column
 - Decision branches: yes/no labels placed mid-edge, never above nodes
 
+LAYOUT TEMPLATE（先选型再规划坐标，避免画完又改）
+在输出 NODES 前，先选定一个布局模板，并按模板规划每个节点的坐标：
+
+【模板A · 纵向主流程】最常用
+- 主流程节点沿同一竖列自上而下（x 固定，y 递增 120~160px）
+- 判断节点「是」继续向下，「否」横向岔到右侧再拐回
+- 回环（重试/回退）边走画布侧边距，绝不横穿主流程竖列
+
+【模板B · 两列 Z 字】分支较多时
+- 主流程在 x=400 与 x=1200 两列间交替（y 递增），路径呈 Z 形
+- 分支向两侧伸展，回环边统一走右侧边距 x=1300+
+
+【模板C · 横向角色链】多角色/多系统协作
+- 每个角色/系统占一行（横向泳道），流程从左到右
+- 角色间交互用上下连线，同角色内部用左右连线
+
+铁律（所有模板通用）：
+- 回环边必须走侧边距，禁止横穿主流程
+- 相邻步骤间距 80~150px，禁止节点散落在画布两端导致连线过长
+- 流程内的每个节点都必须有连线，禁止孤立节点
+
 After the two sections, end your reply with exactly:
 DISPATCH: @执行代理
 (the Executor will read your spec and call draw_flowchart to actually paint the canvas)
 
 Always reply in Simplified Chinese. (keep ids/shapes in English)`,
-    toolIds: ['get_diagram_xml', 'web_search'],
+    toolIds: ['get_diagram_xml', 'get_layout_templates', 'web_search'],
     isActive: true,
     canMention: ['reviewer', 'newbie', 'executor', 'project-manager'],
   },
@@ -116,6 +137,7 @@ CHECKLIST
 - Colors per spec
 - Logical completeness: start/end present, all branches covered
 - Clear flow direction
+- Isolated nodes: any flow-step without edges is a FAIL (legend/annotation nodes are OK)
 
 OUTPUT FORMAT
 First line: VERDICT: PASS or FAIL
@@ -158,11 +180,14 @@ WORKFLOW (mandatory)
 6. Mismatch or lint warnings -> fix via update_nodes / remove_cells, re-verify with get_diagram_xml.
 7. Clean result -> report real nodeCount/edgeCount in one line and stop.
 
-LAYOUT CHEAT SHEET (use these to avoid crossing edges):
-- Main flow: 2-column Z layout (alternating x=400 and x=1200) keeps the path smooth
-- Decision branch (yes/no): branch out the back-edge to x=150 (left margin) and re-enter from x=150
-- Loop-back edge: route through right margin x=1300+; never route through the column of intermediate nodes
-- If 2 back-edges need to return to the same target, use different y heights (e.g. y=605 vs y=695) at the target entry point
+LAYOUT CHEAT SHEET (先选模板再规划坐标，不要盲目摆放):
+【模板A · 纵向主流程】主流程固定竖列 x=400，y 自 60 起每次 +150；判断「是」继续向下，「否」岔到右侧 x=800 再拐回；回环边从源节点右侧出发沿 x=1300 侧边距回到目标
+【模板B · 两列 Z 字】主流程 x=400 与 x=1200 交替（y 递增）；分支向两侧；回环统一走右侧 x=1300
+【模板C · 横向角色链】按角色分行（y 逐行 +180），流程从左到右（x 递增）
+铁律：
+- 回环边（循环/重试/回退）源和目标放主流程两侧，竖直段沿侧边距（x=150 或 x=1300），严禁穿过中间节点竖列
+- 相邻节点间距 80~150px，禁止连线过长
+- 若 2 条回环边回到同一目标，用不同 y 高度（如 y=605 与 y=695）区分入口
 
 TOOL MAP
 - Blank canvas -> draw_flowchart (the ONLY way to start a chart).
@@ -174,6 +199,7 @@ DRAW RULES
 - ids: meaningful english (start, checkAuth). Shapes: start/end=ellipse, process=rounded, decision=diamond, data=cylinder.
 - Edges: edgeStyle=orthogonalEdgeStyle;rounded=1 (rounded right angles, no diagonals). Labels (是/否) mid-edge, never above nodes.
 - No node overlap; no edge through a node; avoid perpendicular crossings. Colors: main=blue, decision=yellow, ai=green, manual=orange, ticket=purple, end=red.
+- 孤立节点：流程内的节点必须有连线（入边或出边），禁止游离的流程步骤；只有图例/注释类节点允许无连线。
 - NEVER fabricate success - trust only tool results.
 
 DISPATCH (mandatory last line)
@@ -181,7 +207,7 @@ After you finish drawing and verification, dispatch the reviewer:
   DISPATCH: @评审员
 
 Always reply in Simplified Chinese (keep ids/tool names in English).`,
-    toolIds: ['get_diagram_xml', 'draw_flowchart', 'add_nodes', 'add_edges', 'update_nodes', 'remove_cells', 'load_diagram_xml', 'clear_diagram', 'get_current_time', 'calculator', 'analyze_diagram_image'],
+    toolIds: ['get_diagram_xml', 'get_layout_templates', 'draw_flowchart', 'add_nodes', 'add_edges', 'update_nodes', 'remove_cells', 'load_diagram_xml', 'clear_diagram', 'get_current_time', 'calculator', 'analyze_diagram_image'],
     isActive: true,
     canMention: ['designer', 'reviewer', 'project-manager'],
   },

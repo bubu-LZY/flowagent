@@ -6,6 +6,7 @@ import { callAI } from './aiService'
 import { delay } from '@/utils/helpers'
 import { validateDiagramQuality, formatQualityReportForAI, QualityReport } from './diagramQuality'
 import { layoutDiagram, fixNodeOverlap } from './diagramLayout'
+import { getLayoutTemplates } from './layoutTemplates'
 import { enableLibavoidForCells, setEdgeRoutingMode, spreadParallelEdges, EdgeRoutingMode } from './diagramRouting'
 
 // ===== XML 修复工具（解决 AI 生成 XML 不规范的问题） =====
@@ -518,6 +519,8 @@ async function executeBuiltinTool(
       return executeAutoLayoutDiagram(args)
     case 'validate_diagram_quality':
       return executeValidateDiagramQuality()
+    case 'get_layout_templates':
+      return executeGetLayoutTemplates()
     case 'set_edge_routing':
       return executeSetEdgeRouting(args)
     case 'parse_document':
@@ -1848,6 +1851,18 @@ async function executeClearDiagram(args: Record<string, any>) {
       message: `清空画布时发生错误：${e.message || '未知错误'}`,
       error: e.message || 'clear_exception',
     }
+  }
+}
+
+// ===== 布局模板库 =====
+
+async function executeGetLayoutTemplates() {
+  const templates = getLayoutTemplates()
+  return {
+    success: true,
+    message: `内置优秀布局模板共 ${templates.length} 个，请在画图前选择其一作为坐标参照（尤其注意回环边走侧边距、节点间距 80~150px）。`,
+    count: templates.length,
+    templates,
   }
 }
 

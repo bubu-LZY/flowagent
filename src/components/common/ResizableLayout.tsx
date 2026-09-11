@@ -38,46 +38,105 @@ export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
     return defaultLeftPercent
   })
 
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+  const computePercent = useCallback((clientX: number): number => {
+    if (!containerRef.current) return leftPercentRef.current
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const containerWidth = containerRect.width
+    if (containerWidth <= 0) return leftPercentRef.current
+
+    const leftWidth = clientX - containerRect.left
+    let percent = (leftWidth / containerWidth) * 100
+
+    const minLeftPercent = (MIN_LEFT_WIDTH / containerWidth) * 100
+    const maxLeftPercent = ((containerWidth - MIN_RIGHT_WIDTH) / containerWidth) * 100
+
+    percent = Math.max(minLeftPercent, Math.min(maxLeftPercent, percent))
+    return percent
+  }, [])
+
+  // 使用 Pointer Capture：指针按下时在分隔条上捕获指针，
+  // 即使指针移入 drawio 的 iframe，pointermove/pointerup 仍定向到分隔条，
+  // 从而彻底解决「松手后仍跟随鼠标」的问题。
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault()
     isResizingRef.current = true
     setIsResizing(true)
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch (err) {
+      // 某些环境不支持 pointer capture 时回退到 window 监听
+      // 这里统一走 capture，失败则忽略（仍有 window 兜底监听）
+    }
   }, [])
 
-  const handleMouseMove = useCallback(
-    (e: MouseEvent) => {
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent) => {
       if (!isResizingRef.current || !containerRef.current) return
-
-      const containerRect = containerRef.current.getBoundingClientRect()
-      const containerWidth = containerRect.width
-      const leftWidth = e.clientX - containerRect.left
-
-      // 计算百分比
-      let percent = (leftWidth / containerWidth) * 100
-
-      // 计算最小百分比
-      const minLeftPercent = (MIN_LEFT_WIDTH / containerWidth) * 100
-      const maxLeftPercent = ((containerWidth - MIN_RIGHT_WIDTH) / containerWidth) * 100
-
-      percent = Math.max(minLeftPercent, Math.min(maxLeftPercent, percent))
-
+      const percent = computePercent(e.clientX)
       leftPercentRef.current = percent
       setLeftPercent(percent)
     },
-    [] // 空依赖，使用 ref 读取状态
+    [computePercent]
   )
 
-  const handleMouseUp = useCallback(() => {
-    if (isResizingRef.current) {
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (!isResizingRef.current) return
+      isResizingRef.current = false
+      setIsResizing(false)
+      try {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId)
+        }
+      } catch (err) {
+        // ignore
+      }
+      try {
+        localStorage.setItem(storageKey, leftPercentRef.current.toString())
+      } catch (err) {
+        // ignore
+      }
+    },
+    [storageKey]
+  )
+
+  const handlePointerCancel = useCallback((e: React.PointerEvent) => {
+    isResizingRef.current = false
+    setIsResizing(false)
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId)
+      }
+    } catch (err) {
+      // ignore
+    }
+  }, [])
+
+  // 兜底：window 级监听，防止 pointer capture 不可用或指针异常退出
+  useEffect(() => {
+    const handleWindowMove = (e: MouseEvent) => {
+      if (!isResizingRef.current || !containerRef.current) return
+      const percent = computePercent(e.clientX)
+      leftPercentRef.current = percent
+      setLeftPercent(percent)
+    }
+    const handleWindowUp = () => {
+      if (!isResizingRef.current) return
       isResizingRef.current = false
       setIsResizing(false)
       try {
         localStorage.setItem(storageKey, leftPercentRef.current.toString())
-      } catch (e) {
+      } catch (err) {
         // ignore
       }
     }
-  }, [storageKey])
+    window.addEventListener('mousemove', handleWindowMove)
+    window.addEventListener('mouseup', handleWindowUp)
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMove)
+      window.removeEventListener('mouseup', handleWindowUp)
+    }
+  }, [computePercent, storageKey])
 
   // 双击重置为默认比例
   const handleDoubleClick = useCallback(() => {
@@ -89,17 +148,6 @@ export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
       // ignore
     }
   }, [storageKey, defaultLeftPercent])
-
-  // 监听鼠标事件 - 只在组件挂载时绑定一次，用 ref 控制状态
-  useEffect(() => {
-    window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', handleMouseUp)
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [handleMouseMove, handleMouseUp])
 
   // 拖拽开始/结束时设置 body 样式
   useEffect(() => {
@@ -129,18 +177,6 @@ export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
 
   return (
     <div ref={containerRef} className="flex w-full h-full overflow-hidden relative">
-      {/* 全屏透明遮罩层 - 拖拽时显示，覆盖 iframe 确保鼠标事件不中断 */}
-      {isResizing && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            zIndex: 9999,
-            cursor: 'col-resize',
-          }}
-        />
-      )}
-
       {/* 左侧面板 */}
       <div
         className="overflow-hidden flex-shrink-0"
@@ -151,11 +187,14 @@ export const ResizableLayout: React.FC<ResizableLayoutProps> = ({
 
       {/* 拖拽分隔条 */}
       <div
-        className={`relative flex-shrink-0 cursor-col-resize group ${
+        className={`relative flex-shrink-0 cursor-col-resize group touch-none ${
           isResizing ? 'z-[10000]' : ''
         }`}
         style={{ width: '4px' }}
-        onMouseDown={handleMouseDown}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
         onDoubleClick={handleDoubleClick}
         title="双击恢复默认比例"
       >

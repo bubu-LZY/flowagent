@@ -16,7 +16,7 @@ import type { DiagramCellInfo } from '@/utils/helpers'
 export type QualityIssueSeverity = 'error' | 'warning' | 'info'
 
 export interface QualityIssue {
-  type: 'nodeOverlap' | 'edgeCrossing' | 'edgeThroughNode' | 'labelOverlap' | 'diagonalEdge' | 'parallelOverlap' | 'edgeTooLong' | 'layoutScatter'
+  type: 'nodeOverlap' | 'edgeCrossing' | 'edgeThroughNode' | 'labelOverlap' | 'diagonalEdge' | 'parallelOverlap' | 'edgeTooLong' | 'layoutScatter' | 'isolatedNode'
   severity: QualityIssueSeverity
   message: string
   details?: Record<string, any>
@@ -91,6 +91,9 @@ export function validateDiagramQuality(cells: Map<string, DiagramCellInfo>): Qua
 
   // 8. 布局松散 / 空间不均检测
   issues.push(...detectLayoutScatter(vertices))
+
+  // 9. 孤立节点检测（无任何连线的节点，需 AI 判断是否属于流程内）
+  issues.push(...detectIsolatedNodes(vertices, edges))
 
   // 统计
   const errorCount = issues.filter((i) => i.severity === 'error').length
@@ -426,6 +429,35 @@ function detectLayoutScatter(
   return issues
 }
 
+// ==================== 9. 孤立节点 ====================
+
+function detectIsolatedNodes(
+  vertices: { id: string; x: number; y: number; w: number; h: number; value: string }[],
+  edges: { id: string; sourceId: string; targetId: string }[]
+): QualityIssue[] {
+  const issues: QualityIssue[] = []
+  if (vertices.length === 0) return issues
+
+  // 收集所有出现过连线的节点 id
+  const connected = new Set<string>()
+  for (const e of edges) {
+    connected.add(e.sourceId)
+    connected.add(e.targetId)
+  }
+
+  for (const v of vertices) {
+    if (connected.has(v.id)) continue
+    const label = v.value || v.id
+    issues.push({
+      type: 'isolatedNode',
+      severity: 'warning',
+      message: `孤立节点「${label}」没有任何连线。请判断它是否属于流程内：若是流程内节点则必须建立连线（孤立交付不合格）；若是图例、注释等流程外节点，可保留。`,
+      details: { node: v.id, value: v.value },
+    })
+  }
+  return issues
+}
+
 // ==================== 辅助函数 ====================
 
 function rectsOverlap(
@@ -591,6 +623,7 @@ export function formatQualityReportForAI(report: QualityReport): string {
     parallelOverlap: '🟡 平行边重合',
     edgeTooLong: '🟠 连线过长',
     layoutScatter: '🟡 布局松散/空间不均',
+    isolatedNode: '🟠 孤立节点',
   }
 
   // 逐条列出所有问题（不截断），并按严重级别编号，方便精准定位
@@ -614,7 +647,8 @@ export function formatQualityReportForAI(report: QualityReport): string {
   lines.push('2. 斜线连线 → 用 set_edge_routing 切换为正交路由（orthogonal），不要改节点位置。')
   lines.push('3. 平行边重合 → 用 update_nodes 微调相关节点的坐标，让两条边错开。')
   lines.push('4. 连线过长 / 布局松散 → 用 update_nodes 把离群节点向主流程靠拢、收紧布局，缩短不必要过长的连线。')
-  lines.push('5. 修复后再次调用 validate_diagram_quality 复检，直到无严重问题且评分达标。')
+  lines.push('5. 孤立节点 → 判断该节点是否属于流程内：流程内节点必须用 add_edge 建立连线（孤立交付不合格）；图例/注释等流程外节点可保留。')
+  lines.push('6. 修复后再次调用 validate_diagram_quality 复检，直到无严重问题且评分达标。')
 
   return lines.join('\n')
 }
