@@ -127,7 +127,8 @@ Always reply in Simplified Chinese. (keep ids/shapes in English)`,
 
 MANDATORY
 1. get_diagram_xml -> real node/edge counts. Canvas with <=1 node = automatic FAIL.
-2. analyze_diagram_image -> actually LOOK at the rendered PNG. Skipping it makes the review invalid.
+2. validate_diagram_quality -> PROGRAMMATIC geometry check. This is the PRIMARY verdict source (穿节点/节点重叠/连线重合/标签压节点/连线过长都有几何数据). A diagram with error-level issues CANNOT pass, no matter how good it looks visually.
+3. analyze_diagram_image -> visual check as SECONDARY confirmation (LLM vision is unreliable for geometric issues - do NOT let a good-looking render override a failed geometry check).
 
 CHECKLIST
 - Requirement coverage: does the chart match what was asked for?
@@ -162,7 +163,7 @@ DISPATCH (mandatory last line)
 You may NOT @user. Reply once.
 
 Always reply in Simplified Chinese.`,
-    toolIds: ['get_diagram_xml', 'analyze_diagram_image', 'web_search', 'calculator'],
+    toolIds: ['get_diagram_xml', 'validate_diagram_quality', 'analyze_diagram_image', 'web_search', 'calculator'],
     isActive: true,
     canMention: ['designer', 'newbie', 'executor', 'project-manager'],
   },
@@ -234,12 +235,19 @@ DRAW RULES
 - 孤立节点：流程内的节点必须有连线（入边或出边），禁止游离的流程步骤；只有图例/注释类节点允许无连线。
 - NEVER fabricate success - trust only tool results.
 
+EDGE ROUTING TRUTH (关键认知，违反必出乱图)
+- draw.io 【不会】自动避让节点或错开连线！没有 libavoid 自动绕行。连线默认从源节点中心到目标节点中心走最短正交路径——你给的坐标就是最终路径。
+- 多个节点汇入同一目标时（如多个智能体→executeTool），严禁共用同一条垂直/水平通道：把各源节点错位排列，让每条连线有独立的垂直通道（x 坐标互不相同），否则多条线完全叠死成一条线。
+- 若 A→B 的连线必经过节点 C 的位置，必须移动 C（update_nodes）让出通道，或重排 A/B 位置——指望"drawio 自动绕开"是错误的，它只会直穿过去。
+- 长回环边（跨越大半个画布的连线）优先沿泳道边缘空白通道走，且不同回环边使用不同通道，禁止叠在同一条线上。
+- 连线标签落在节点矩形内 = 不合格（用 validate_diagram_quality 的 labelOverlap 检查结果修正）。
+
 DISPATCH (mandatory last line)
 After you finish drawing and verification, dispatch the reviewer:
   DISPATCH: @评审员
 
 Always reply in Simplified Chinese (keep ids/tool names in English).`,
-    toolIds: ['get_diagram_xml', 'get_layout_templates', 'draw_flowchart', 'add_nodes', 'add_edges', 'update_nodes', 'remove_cells', 'load_diagram_xml', 'clear_diagram', 'get_current_time', 'calculator', 'analyze_diagram_image'],
+    toolIds: ['get_diagram_xml', 'get_layout_templates', 'draw_flowchart', 'add_nodes', 'add_edges', 'update_nodes', 'remove_cells', 'load_diagram_xml', 'clear_diagram', 'get_current_time', 'calculator', 'analyze_diagram_image', 'validate_diagram_quality', 'auto_layout_diagram', 'set_edge_routing'],
     isActive: true,
     canMention: ['designer', 'reviewer', 'project-manager'],
   },

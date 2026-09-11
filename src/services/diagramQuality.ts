@@ -50,7 +50,13 @@ export function validateDiagramQuality(cells: Map<string, DiagramCellInfo>): Qua
     w: c.width ?? 120,
     h: c.height ?? 60,
     value: c.value,
+    style: c.style || '',
   }))
+
+  // 容器节点（泳道/分组框）：几何上"包含"内部节点是 drawio 标准用法，
+  // 必须从几何检测中排除，否则容器与内部节点的假"重叠"会刷屏淹没真问题
+  const isContainer = (v: { style: string }) => /swimlane|(^|;)\s*group=/.test(v.style)
+  const solidVertices = vertices.filter((v) => !isContainer(v))
 
   const edges = Array.from(cells.values()).filter((c) => c.type === 'edge').map((c) => {
     const s = vertices.find((v) => v.id === c.sourceId)
@@ -68,32 +74,32 @@ export function validateDiagramQuality(cells: Map<string, DiagramCellInfo>): Qua
     }
   }).filter((e) => e.sourceId && e.targetId)
 
-  // 1. 节点重叠检测
+  // 1. 节点重叠检测（容器嵌套关系已在其内部排除）
   issues.push(...detectNodeOverlap(vertices))
 
   // 2. 连线交叉检测
   issues.push(...detectEdgeCrossing(edges))
 
-  // 3. 连线穿节点检测
-  issues.push(...detectEdgeThroughNode(edges, vertices))
+  // 3. 连线穿节点检测（泳道/分组容器不算"被穿过"——连线在泳道内穿行是正常行为）
+  issues.push(...detectEdgeThroughNode(edges, solidVertices))
 
-  // 4. 标签压节点检测
-  issues.push(...detectLabelOverlap(edges, vertices, cells))
+  // 4. 标签压节点检测（标签落在泳道背景区域内不算问题）
+  issues.push(...detectLabelOverlap(edges, solidVertices, cells))
 
   // 5. 斜线检测（非正交连线）
   issues.push(...detectDiagonalEdges(edges, cells))
 
-  // 6. 平行边重合检测
+  // 6. 平行边重合检测（含同节点对多边 + 不同边几何共线重叠）
   issues.push(...detectParallelOverlap(edges))
 
-  // 7. 连线过长检测
-  issues.push(...detectEdgeTooLong(edges, vertices))
+  // 7. 连线过长检测（容器超大面积会拉爆基准值，只统计普通节点）
+  issues.push(...detectEdgeTooLong(edges, solidVertices))
 
-  // 8. 布局松散 / 空间不均检测
-  issues.push(...detectLayoutScatter(vertices))
+  // 8. 布局松散 / 空间不均检测（泳道容器到内部节点的"最近邻距离"是伪距离）
+  issues.push(...detectLayoutScatter(solidVertices))
 
-  // 9. 孤立节点检测（无任何连线的节点，需 AI 判断是否属于流程内）
-  issues.push(...detectIsolatedNodes(vertices, edges))
+  // 9. 孤立节点检测（无任何连线的节点，需 AI 判断是否属于流程内；容器本身不需要连线）
+  issues.push(...detectIsolatedNodes(solidVertices, edges))
 
   // 统计
   const errorCount = issues.filter((i) => i.severity === 'error').length
@@ -111,23 +117,27 @@ export function validateDiagramQuality(cells: Map<string, DiagramCellInfo>): Qua
 
 // ==================== 1. 节点重叠 ====================
 
-function detectNodeOverlap(vertices: { id: string; x: number; y: number; w: number; h: number }[]): QualityIssue[] {
+function detectNodeOverlap(vertices: { id: string; x: number; y: number; w: number; h: number; style?: string }[]): QualityIssue[] {
   const issues: QualityIssue[] = []
+  const isContainerStyle = (style?: string) => !!style && /swimlane|(^|;)\s*group=/.test(style)
   for (let i = 0; i < vertices.length; i++) {
     for (let j = i + 1; j < vertices.length; j++) {
       const a = vertices[i]
       const b = vertices[j]
-      if (rectsOverlap(a, b)) {
-        const overlapArea = overlapAreaRect(a, b)
-        const severity: QualityIssueSeverity =
-          overlapArea > Math.min(a.w * a.h, b.w * b.h) * 0.3 ? 'error' : 'warning'
-        issues.push({
-          type: 'nodeOverlap',
-          severity,
-          message: `节点「${a.id}」与「${b.id}」重叠，重叠面积约 ${Math.round(overlapArea)}px²`,
-          details: { nodeA: a.id, nodeB: b.id, overlapArea: Math.round(overlapArea) },
-        })
-      }
+      if (!rectsOverlap(a, b)) continue
+      // 容器嵌套：泳道/分组框完全包含内部节点是 drawio 标准用法，不是重叠
+      const aContainsB = a.x <= b.x && a.y <= b.y && a.x + a.w >= b.x + b.w && a.y + a.h >= b.y + b.h
+      const bContainsA = b.x <= a.x && b.y <= a.y && b.x + b.w >= a.x + a.w && b.y + b.h >= a.y + a.h
+      if ((aContainsB && isContainerStyle(a.style)) || (bContainsA && isContainerStyle(b.style))) continue
+      const overlapArea = overlapAreaRect(a, b)
+      const severity: QualityIssueSeverity =
+        overlapArea > Math.min(a.w * a.h, b.w * b.h) * 0.3 ? 'error' : 'warning'
+      issues.push({
+        type: 'nodeOverlap',
+        severity,
+        message: `节点「${a.id}」与「${b.id}」重叠，重叠面积约 ${Math.round(overlapArea)}px²`,
+        details: { nodeA: a.id, nodeB: b.id, overlapArea: Math.round(overlapArea) },
+      })
     }
   }
   return issues
@@ -335,7 +345,63 @@ function detectParallelOverlap(
       }
     }
   }
+
+  // 【几何共线重叠】不同节点对的边也可能叠在同一路径上（如多个源节点汇入同一目标，
+  // 全部从底边中心垂直下穿）。这是实测高频严重问题：视觉上多条线叠成一条，无法辨认。
+  const COINCIDE_MIN_PX = 40
+  for (let i = 0; i < edges.length; i++) {
+    for (let j = i + 1; j < edges.length; j++) {
+      const a = edges[i]
+      const b = edges[j]
+      const samePair =
+        (a.sourceId === b.sourceId && a.targetId === b.targetId) ||
+        (a.sourceId === b.targetId && a.targetId === b.sourceId)
+      if (samePair) continue // 同节点对已在上面专项检测
+      const segsA = buildOrthogonalSegments(a.sx, a.sy, a.tx, a.ty)
+      const segsB = buildOrthogonalSegments(b.sx, b.sy, b.tx, b.ty)
+      let coincided = false
+      for (const s1 of segsA) {
+        if (coincided) break
+        for (const s2 of segsB) {
+          if (coincidentOverlapLen(s1, s2) >= COINCIDE_MIN_PX) {
+            coincided = true
+            break
+          }
+        }
+      }
+      if (coincided) {
+        issues.push({
+          type: 'parallelOverlap',
+          severity: 'error',
+          message: `连线「${a.sourceId}→${a.targetId}」与「${b.sourceId}→${b.targetId}」有一段路径重叠（叠在同一直线上），多条线叠成一条无法辨认，必须错开通道或锚点`,
+          details: { edgeA: a.id, edgeB: b.id, sourceA: a.sourceId, targetA: a.targetId, sourceB: b.sourceId, targetB: b.targetId },
+        })
+      }
+    }
+  }
   return issues
+}
+
+// 两段线共线时的投影重叠长度（不共线返回 0）
+function coincidentOverlapLen(
+  s1: [number, number, number, number],
+  s2: [number, number, number, number]
+): number {
+  const [x1, y1, x2, y2] = s1
+  const [x3, y3, x4, y4] = s2
+  const aVert = x1 === x2
+  const bVert = x3 === x4
+  if (aVert !== bVert) return 0
+  if (aVert) {
+    if (x1 !== x3) return 0
+    const lo1 = Math.min(y1, y2), hi1 = Math.max(y1, y2)
+    const lo2 = Math.min(y3, y4), hi2 = Math.max(y3, y4)
+    return Math.max(0, Math.min(hi1, hi2) - Math.max(lo1, lo2))
+  }
+  if (y1 !== y3) return 0
+  const lo1 = Math.min(x1, x2), hi1 = Math.max(x1, x2)
+  const lo2 = Math.min(x3, x4), hi2 = Math.max(x3, x4)
+  return Math.max(0, Math.min(hi1, hi2) - Math.max(lo1, lo2))
 }
 
 // ==================== 7. 连线过长 ====================
