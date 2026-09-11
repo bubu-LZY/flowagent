@@ -172,6 +172,19 @@ function buildMessages(
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const result: OpenAI.Chat.ChatCompletionMessageParam[] = []
 
+  // ========== 上下文长度保护 ==========
+  // 防止单条超长内容把 API 请求撑爆（400 invalid params / 上下文超限）：
+  // 执行代理一个回合可以积累几万字思考内容 + 多个含 XML 的工具结果，
+  // 消息条数压缩（30 条阈值）救不了"单条超长"，必须按字符截断。
+  // 截断只发生在送入 API 的副本上，聊天记录原内容不受影响。
+  const MAX_MSG_CONTENT_CHARS = 12_000
+  const MAX_REASONING_CHARS = 2_000
+  const MAX_TOOL_RESULT_CHARS = 6_000
+  const truncateForContext = (text: string, maxChars: number): string => {
+    if (!text || text.length <= maxChars) return text
+    return text.slice(0, maxChars) + `\n…（内容过长已截断，原文共 ${text.length} 字符）`
+  }
+
   // 构建完整的系统提示词（包含 Skill）
   let fullSystemPrompt = systemPrompt
 
@@ -253,12 +266,12 @@ function buildMessages(
         result.push({
           role: 'user',
           content: [
-            { type: 'text', text: `[${senderName}]：${msg.content || '这是当前流程图的图片，请进行视觉分析。'}` },
+            { type: 'text', text: `[${senderName}]：${truncateForContext(msg.content || '这是当前流程图的图片，请进行视觉分析。', MAX_MSG_CONTENT_CHARS)}` },
             { type: 'image_url', image_url: { url: msg.imageDataUrl } },
           ],
         })
       } else {
-        userTextBuffer.push(`[${senderName}]：${msg.content}`)
+        userTextBuffer.push(`[${senderName}]：${truncateForContext(msg.content, MAX_MSG_CONTENT_CHARS)}`)
       }
     } else if (msg.role === 'assistant') {
       if (msg.agentId === agentId) {
@@ -267,14 +280,15 @@ function buildMessages(
 
         const assistantMsg: OpenAI.Chat.ChatCompletionAssistantMessageParam = {
           role: 'assistant',
-          content: msg.content || undefined,
+          content: msg.content ? truncateForContext(msg.content, MAX_MSG_CONTENT_CHARS) : undefined,
         }
 
         // 深度思考内容（reasoning）
         if (msg.thinkingContent) {
           // 某些 OpenAI 兼容 API 支持 reasoning_content 字段
           // 这里通过类型断言添加，保持兼容性
-          ;(assistantMsg as any).reasoning_content = msg.thinkingContent
+          // 历史思考内容回传时截断：重试/后续调度不需要完整旧思考链，几万字回传会撑爆上下文
+          ;(assistantMsg as any).reasoning_content = truncateForContext(msg.thinkingContent, MAX_REASONING_CHARS)
         }
 
         // 工具调用
@@ -297,9 +311,12 @@ function buildMessages(
             if (tc.status === 'completed' || tc.status === 'error') {
               // 统一使用 JSON 字符串格式，确保 AI 收到一致的结果格式
               // 错误情况也包含结构化的 result 对象，方便 AI 理解
-              const toolContent = tc.result !== undefined
+              // 工具结果截断：get_diagram_xml / draw_flowchart 等返回的 XML 动辄几万字符，
+              // 多个工具结果累计极易超过 API 上下文上限导致 400
+              const rawToolContent = tc.result !== undefined
                 ? (typeof tc.result === 'string' ? tc.result : JSON.stringify(tc.result))
                 : (tc.errorMessage || JSON.stringify({ success: false, error: 'unknown', message: '工具无返回结果' }))
+              const toolContent = truncateForContext(rawToolContent, MAX_TOOL_RESULT_CHARS)
 
               result.push({
                 role: 'tool',

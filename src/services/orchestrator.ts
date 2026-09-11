@@ -1372,9 +1372,27 @@ ${skillInfoText}${toolsInfo}`
       let success = false
       let callError: any = null
 
-      // 单次智能体回复的硬超时兜底：不依赖 SDK 的 AbortSignal
-      // 即使 callAI 内部 fetch/stream 完全卡死（abort 不生效），也能在超时后强制中断
-      const HARD_CALL_TIMEOUT_MS = 5 * 60 * 1000
+      // 单次智能体回复的硬超时兜底：改为「无进度」watchdog。
+      // 旧实现是从调用开始固定倒计时 300 秒，执行代理多工具 + 思考型模型的活跃回合
+      // 轻松超过 5 分钟，正在流式输出却被误杀并报「300秒无响应」（实测问题）。
+      // 新规则：任何 token / 思考片段 / 工具调用 / 工具结果都算进度并刷新计时；
+      // 连续 300 秒无任何进度才判卡死强制中断；另设 30 分钟绝对上限兜底
+      // （aiService 内部已有 60 秒流无数据超时 + 15 分钟总超时，watchdog 只作外部保险）。
+      const HARD_IDLE_TIMEOUT_MS = 5 * 60 * 1000
+      const HARD_TOTAL_TIMEOUT_MS = 30 * 60 * 1000
+      const callStartedAt = Date.now()
+      let lastActivityAt = Date.now()
+      const touchActivity = () => { lastActivityAt = Date.now() }
+
+      let watchdogReject: ((err: Error) => void) | null = null
+      const hardTimeoutPromise = new Promise<never>((_, reject) => { watchdogReject = reject })
+      const watchdogTimer = setInterval(() => {
+        if (Date.now() - lastActivityAt > HARD_IDLE_TIMEOUT_MS) {
+          watchdogReject?.(new Error(`AI 调用硬超时（连续 ${HARD_IDLE_TIMEOUT_MS / 1000} 秒无任何进度）`))
+        } else if (Date.now() - callStartedAt > HARD_TOTAL_TIMEOUT_MS) {
+          watchdogReject?.(new Error(`AI 调用总时长超限（${HARD_TOTAL_TIMEOUT_MS / 60000} 分钟）`))
+        }
+      }, 10 * 1000)
 
       try {
         fullContent = await Promise.race([
@@ -1382,9 +1400,16 @@ ${skillInfoText}${toolsInfo}`
             systemPrompt,
             messages: contextMessages,
             agentId: agent.id,
-            onToken: (token) => ops.appendToMessage(messageId, token),
-            onReasoningToken: (token) => ops.appendThinkingToMessage(messageId, token),
+            onToken: (token) => {
+              touchActivity()
+              ops.appendToMessage(messageId, token)
+            },
+            onReasoningToken: (token) => {
+              touchActivity()
+              ops.appendThinkingToMessage(messageId, token)
+            },
             onToolCall: (toolCall: any) => {
+              touchActivity()
               useChatStore.getState().addToolCall(messageId, toolCall)
               allToolCalls.push(toolCall)
               addLog(sessionId, 'tool_call', `调用工具 ${toolCall.name}`, {
@@ -1397,6 +1422,7 @@ ${skillInfoText}${toolsInfo}`
               })
             },
             onToolResult: (toolCallId: string, result: any) => {
+              touchActivity()
               const updates: any = {
                 result,
                 status: result?.success === false ? 'error' : 'completed',
@@ -1420,18 +1446,19 @@ ${skillInfoText}${toolsInfo}`
               })
             },
           }),
-          new Promise<string>((_, reject) => {
-            setTimeout(() => {
-              reject(new Error(`AI 调用硬超时（${HARD_CALL_TIMEOUT_MS / 1000}秒无响应）`))
-            }, HARD_CALL_TIMEOUT_MS)
-          }),
+          hardTimeoutPromise,
         ])
       } catch (e) {
         // 【关键修复】之前这里把异常吞掉转成文本，导致 success 仍被设为 true，
         // AI 失败/超时被当成"成功"继续调度，任务既没有重试也没有报错，直接"卡死"
         console.error('[orchestrator] callAI 异常:', e)
         callError = e
-        fullContent = `\n\n（AI 调用异常：${(e as any)?.message || '未知错误'}）`
+        // 保留已流式输出的内容（超时/异常时 AI 往往已输出大半），在其后追加异常标记。
+        // 之前直接用异常文本整条覆盖，导致"正在响应的内容突然消失只剩报错"
+        const streamed = useChatStore.getState().messages.find((m) => m.id === messageId)?.content || ''
+        fullContent = `${streamed}\n\n（AI 调用异常：${(e as any)?.message || '未知错误'}）`
+      } finally {
+        clearInterval(watchdogTimer)
       }
 
       // 写回消息（含工具调用与 imageDataUrl）
