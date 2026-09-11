@@ -290,23 +290,53 @@ async function handleSendChatMessage(args: any) {
   // MCP 消息是外部新发起的用户意图，等价于用户在界面手动发送（UI 发送会 resetStopped）。
   // 之前不重置，前台遗留的 isStopped=true 会拦截后台智能体调度和工具执行（跨会话状态污染实测 bug）
   useChatStore.getState().resetStopped()
-  await addMessage(message as any)
+  // 【修复·致命】之前把裸字符串传给 addMessage，消息列表里存的是字符串而非 ChatMessage，
+  // 编排器读 userMessage.content 得到 undefined，第一处 .length 访问即抛 TypeError，
+  // 被无 catch 的调度链静默吞掉——MCP 任务"已受理"但从未启动。
+  // 必须构造与 UI 发送路径（ChatPanel.handleSend）一致的消息对象
+  const userMessage: ChatMessage = {
+    id: generateId(),
+    role: 'user',
+    content: message,
+    timestamp: Date.now(),
+    mentions: [],
+  }
+  await addMessage(userMessage)
+  // 立即落盘：UI 路径有发送后 saveToDisk，MCP 路径此前完全没有，
+  // 消息只存在于内存，进程退出即丢（后台会话 session.json 始终 0 条的根因）
+  await persistTaskSession(targetSessionId)
   // 【修复】之前只把消息塞进聊天记录、从未启动多智能体调度（multiAgentOrchestrator 导入了但没调用），
   // awaitCompletion=true 时必然等到超时。现在与 UI 发送一致地启动编排器。
-  multiAgentOrchestrator.startConversation(message as ChatMessage, {
+  // startConversation 内部已有 catch 兜底，这里再兜一层防止启动阶段本身抛异常导致静默失败
+  multiAgentOrchestrator.startConversation(userMessage, {
     addMessage,
     updateMessage,
     appendToMessage,
     appendThinkingToMessage,
     setStreaming,
+  }).catch(async (e) => {
+    console.error('[MCP] 编排器启动失败:', e)
+    try {
+      addMessage({
+        id: generateId(),
+        role: 'assistant',
+        agentId: 'system',
+        agentName: '系统',
+        agentAvatar: '⚠️',
+        agentColor: '#ef4444',
+        content: `⚠️ 多智能体调度启动失败：${e?.message || e}`,
+        timestamp: Date.now(),
+      })
+      await persistTaskSession(targetSessionId)
+    } catch {}
   })
 
   if (!awaitCompletion) {
     // 【修复】不能立即切回原会话：chatStore.messages 绑定当前活跃会话（ChatPanel 自动保存到
     // currentSessionId），编排器还在流式写入时切回会把智能体消息保存进用户前台会话（跨会话污染）。
-    // 改为后台监视，编排器空闲后再切回原会话
+    // 改为后台监视，编排器彻底空闲后再切回原会话
     if (switched && originalSessionId) {
-      watchAndRestoreSession(originalSessionId, timeout)
+      watchAndRestoreSession(targetSessionId, originalSessionId, timeout)
     }
     return {
       success: true,
@@ -325,33 +355,37 @@ async function handleSendChatMessage(args: any) {
 
       if (elapsed > timeout) {
         clearInterval(checkInterval)
-        // 【修复】超时切回前必须确认编排器已空闲：仍流式时切回会把智能体消息
-        // 保存进用户前台会话。仍在运行则留在后台会话，由客户端凭 sessionId 继续查询
-        if (switched && originalSessionId && streamingAgents.length === 0) {
-          sessionStore.switchSession(originalSessionId)
-        }
-        resolve({
-          success: true,
-          status: 'timeout',
-          sessionId: targetSessionId,
-          message: `等待超时（${timeout}秒），任务仍在后台进行中`,
-          lastMessages: messages.slice(-5).map(m => ({
-            id: m.id,
-            agentId: m.agentId,
-            agentName: m.agentName,
-            content: m.content.slice(0, 200),
-            timestamp: m.timestamp,
-          })),
+        // 【修复】超时切回前必须确认编排器已空闲（含编排器调度状态，不能只看流式）：
+        // 仍忙时切回会把智能体消息保存进用户前台会话。仍在运行则留在后台会话，
+        // 由客户端凭 sessionId 继续查询；无论哪种情况都先落盘
+        persistTaskSession(targetSessionId).finally(() => {
+          if (switched && originalSessionId && !multiAgentOrchestrator.isBusy() && streamingAgents.length === 0) {
+            sessionStore.switchSession(originalSessionId)
+          }
+          resolve({
+            success: true,
+            status: 'timeout',
+            sessionId: targetSessionId,
+            message: `等待超时（${timeout}秒），任务仍在后台进行中`,
+            lastMessages: messages.slice(-5).map(m => ({
+              id: m.id,
+              agentId: m.agentId,
+              agentName: m.agentName,
+              content: (m.content || '').slice(0, 200),
+              timestamp: m.timestamp,
+            })),
+          })
         })
         return
       }
 
-      // 如果没有正在流式输出，且不在等待用户，且没有停止，则认为完成
-      if (streamingAgents.length === 0 && !waitingForUser && !isStopped) {
-        setTimeout(() => {
+      // 如果编排器彻底空闲（无流式 + 不在调度中），且不在等待用户，且没有停止，则认为完成
+      if (!multiAgentOrchestrator.isBusy() && streamingAgents.length === 0 && !waitingForUser && !isStopped) {
+        setTimeout(async () => {
           const state = useChatStore.getState()
-          if (state.streamingAgents.length === 0 && !state.waitingForUser && !state.isStopped) {
+          if (!multiAgentOrchestrator.isBusy() && state.streamingAgents.length === 0 && !state.waitingForUser && !state.isStopped) {
             clearInterval(checkInterval)
+            await persistTaskSession(targetSessionId)
             if (switched && originalSessionId) {
               sessionStore.switchSession(originalSessionId)
             }
@@ -359,7 +393,7 @@ async function handleSendChatMessage(args: any) {
               id: m.id,
               agentId: m.agentId,
               agentName: m.agentName,
-              content: m.content.slice(0, 500),
+              content: (m.content || '').slice(0, 500),
               timestamp: m.timestamp,
             }))
             resolve({
@@ -377,27 +411,60 @@ async function handleSendChatMessage(args: any) {
   })
 }
 
-// 后台监视编排器状态：空闲（无流式输出）后切回原会话，避免 MCP 后台任务长期占用前台显示。
+// 把 chatStore 当前消息同步进任务会话并写盘。
+// 直接操作 store（不依赖 React 副作用），规避窗口后台时 Chromium 渲染节流导致
+// ChatPanel 的自动保存不执行、消息只存在于内存的问题。
+// 必须校验 currentSessionId 仍是任务会话：用户中途手动切走会话时绝不落盘，防止跨会话污染
+async function persistTaskSession(targetSessionId: string) {
+  try {
+    const sessionStore = useSessionStore.getState()
+    if (sessionStore.currentSessionId !== targetSessionId) return
+    sessionStore.saveMessages(useChatStore.getState().messages)
+    await sessionStore.saveToDisk()
+  } catch (e) {
+    console.warn('[MCP] 任务会话落盘失败:', e)
+  }
+}
+
+// 后台监视编排器状态：彻底空闲后切回原会话，避免 MCP 后台任务长期占用前台显示。
 // 超时上限内仍未空闲则放弃切回（数据安全优先，用户可手动切换）
-function watchAndRestoreSession(originalSessionId: string, timeoutSeconds: number) {
+function watchAndRestoreSession(targetSessionId: string, originalSessionId: string, timeoutSeconds: number) {
   const startTime = Date.now()
   let idleTicks = 0
-  const timer = setInterval(() => {
-    const { streamingAgents } = useChatStore.getState()
-    if (streamingAgents.length === 0) {
-      idleTicks++
-      // 连续 2 秒无流式，二次确认后切回，避免轮次间隙误判
-      if (idleTicks >= 2) {
-        clearInterval(timer)
-        if (useSessionStore.getState().currentSessionId !== originalSessionId) {
-          useSessionStore.getState().switchSession(originalSessionId)
+  let busyTicks = 0
+  const timer = setInterval(async () => {
+    try {
+      const { streamingAgents } = useChatStore.getState()
+      // 【修复】之前只看 streamingAgents：编排器启动初期（意图判断/首个智能体
+      // 调度前的延迟阶段）streamingAgents 本来就是空的，2 秒就被误判"空闲"
+      // 切回原会话，编排器后续输出全部写进用户前台会话（跨会话污染）。
+      // 必须同时看编排器自身的调度状态
+      const busy = multiAgentOrchestrator.isBusy() || streamingAgents.length > 0
+      if (busy) {
+        idleTicks = 0
+        busyTicks++
+        // 每 3 秒落盘一次：智能体流式输出持续产生消息，渲染节流时
+        // 依赖 ChatPanel 副作用不可靠，主动同步消息到会话并写盘
+        if (busyTicks % 3 === 0) {
+          await persistTaskSession(targetSessionId)
+        }
+        if ((Date.now() - startTime) / 1000 > timeoutSeconds) {
+          clearInterval(timer)
+          await persistTaskSession(targetSessionId)
+        }
+      } else {
+        idleTicks++
+        // 连续 3 秒确认空闲（编排器结束或等待用户输入），落盘后切回原会话
+        if (idleTicks >= 3) {
+          clearInterval(timer)
+          await persistTaskSession(targetSessionId)
+          if (useSessionStore.getState().currentSessionId === targetSessionId) {
+            useSessionStore.getState().switchSession(originalSessionId)
+          }
         }
       }
-    } else {
-      idleTicks = 0
-      if ((Date.now() - startTime) / 1000 > timeoutSeconds) {
-        clearInterval(timer)
-      }
+    } catch (e) {
+      console.warn('[MCP] 后台会话监视异常:', e)
     }
   }, 1000)
 }
@@ -529,7 +596,7 @@ async function handleGetSystemInfo() {
     success: true,
     info: {
       appName: 'Flowchart Agent',
-      version: '0.7.1',
+      version: '0.7.2',
       sessionCount: sessions.length,
       currentSessionId,
       currentSessionMessageCount: messages.length,

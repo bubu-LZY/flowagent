@@ -908,11 +908,35 @@ decision1 -> process1 | 否
 
     try {
       await this.processConversation(userMessage, ops)
+    } catch (e) {
+      // 【修复】之前 try 只有 finally 没有 catch：processConversation 任何异常
+      // （消息对象不完整、AI 调用崩溃等）都会变成 unhandled rejection 静默消失，
+      // 用户侧表现为"消息发出去了但什么都没发生"。现在必须留下可见的系统消息
+      console.error('[orchestrator] 调度过程异常:', e)
+      try {
+        ops.addMessage({
+          id: generateId(),
+          role: 'assistant',
+          agentId: 'system',
+          agentName: '系统',
+          agentAvatar: '⚠️',
+          agentColor: '#ef4444',
+          content: `⚠️ 多智能体调度异常：${(e as Error)?.message || e}。请重试，或检查智能体与模型配置。`,
+          timestamp: Date.now(),
+        })
+      } catch {}
     } finally {
       this.isRunning = false
       // 处理队列中的下一条消息
       await this.processQueuedMessages(ops)
     }
+  }
+
+  // 供 MCP 等外部调用方判断编排器是否仍在工作。
+  // isRunning 涵盖完整调度周期（含意图判断、智能体间延迟等无流式输出的阶段），
+  // streamingAgents 只反映流式输出窗口，两者取或才是完整的忙状态
+  isBusy(): boolean {
+    return this.isRunning || useChatStore.getState().streamingAgents.length > 0
   }
 
   // 实际处理对话的内部方法

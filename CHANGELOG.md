@@ -1,3 +1,12 @@
+## v0.7.2 - 2026-09-11
+
+### 🐛 Bug 修复（MCP 后台任务"已受理但从未启动"根因修复）
+- 修复「MCP send_chat_message 任务静默失效」致命 bug：此前把裸字符串直接传给 addMessage，消息列表里存的是字符串而非 ChatMessage 对象，编排器读 userMessage.content 得到 undefined，第一处 .length 访问即抛 TypeError——异常被无 catch 的调度链静默吞掉，MCP 返回"已受理"但多智能体从未启动（实测：发送任务 15 秒后轮数仍为 0、无任何智能体消息）。现在构造与 UI 发送路径一致的消息对象
+- 修复「MCP 后台会话消息不落盘」：MCP 路径此前没有任何 saveToDisk 调用（UI 路径有发送后落盘），消息只存在于内存，后台会话 session.json 始终 0 条。现在发送后立即落盘 + 后台任务运行期间每 3 秒周期落盘（直接操作 store，不依赖 React 副作用，规避窗口后台时渲染节流导致自动保存不执行）
+- 修复「MCP watcher 过早切回原会话导致跨会话污染」：此前只看 streamingAgents 空闲 2 秒就切回，但编排器启动初期（意图判断/首个智能体调度延迟阶段）streamingAgents 本来就是空的，切回后智能体后续输出全部写进用户前台会话。现在新增 orchestrator.isBusy()（调度状态+流式状态取或），彻底空闲 3 秒确认后才落盘切回；用户中途手动切走会话时绝不落盘不切回
+- 修复「编排器异常静默死亡」：startConversation 的 try 此前只有 finally 没有 catch，任何调度异常都是 unhandled rejection 无声消失。现在 catch 后输出可见的系统错误消息（⚠️ 多智能体调度异常），MCP 调用处再兜一层
+- awaitCompletion 等待分支同步修复：完成判定加入编排器调度状态检查（防止启动初期被误判完成）、完成/超时切回前先落盘、lastMessages 对 content 加空值保护
+
 ## v0.7.1 - 2026-09-11
 
 ### 🐛 Bug 修复（乱图连环失效根因修复）
