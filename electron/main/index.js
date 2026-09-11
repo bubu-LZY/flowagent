@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage, shell, pow
 const path = require('node:path')
 const fs = require('node:fs')
 const mcpServer = require('./mcp-server.cjs')
+const drawioStaticServer = require('./drawio-static-server.cjs')
 
 // 关键修复：窗口最小化/隐藏到托盘后，Chromium 会把渲染进程后台化（renderer backgrounding），
 // 导致 AI 流式请求（SSE）收不到数据、后台调度卡死。以下开关强制渲染进程持续运行。
@@ -154,6 +155,22 @@ if (!isDev) {
   // IPC Handlers
   ipcMain.handle('app:get-version', () => {
     return app.getVersion()
+  })
+
+  // 提供本地 draw.io URL 给渲染进程（优先本地，断网仍可工作；外网作为 fallback）
+  ipcMain.handle('app:get-drawio-url', () => {
+    const port = drawioStaticServer.PORT
+    const host = drawioStaticServer.HOST
+    const params = 'embed=1&ui=kennedy&spin=1&proto=json&noExitBtn=1&noSaveBtn=1&stealth=1&noSave=0&noCloud=1&nofonts=1&notifications=0&autosave=1'
+    return {
+      success: true,
+      localUrl: `http://${host}:${port}/?${params}`,
+      remoteFallbackUrls: [
+        `https://embed.diagrams.net/?${params}`,
+        `https://app.diagrams.net/?${params}`,
+        `https://www.draw.io/?${params}`,
+      ],
+    }
   })
 
   // 用系统默认浏览器打开外部链接
@@ -890,6 +907,12 @@ updatedAt: ${now}
 
     // 防止系统休眠挂起应用，保证后台调度与网络请求持续执行
     powerSaveBlocker.start('prevent-app-suspension')
+
+    // 启动本地 draw.io 静态资源服务（断网也能加载画布，避免依赖 embed.diagrams.net）
+    const drawioResult = drawioStaticServer.startServer()
+    if (!drawioResult.success) {
+      console.warn('[drawio-static] 本地 draw.io 服务启动失败，画布将尝试外网备用地址:', drawioResult.error)
+    }
 
     // 设置 MCP 服务的主窗口引用
     mcpServer.setMainWindow(mainWindow)

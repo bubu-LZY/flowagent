@@ -18,7 +18,11 @@ interface DrawIoCanvasProps {
 // draw.io 嵌入 URL 列表，按优先级排列，加载失败时自动尝试下一个
 // autosave=1：用户在 draw.io 里手动编辑后会回传 autosave 事件（带 XML），
 // 没有它我们就不知道用户改了什么，执行代理下一次 add_node 会用旧状态重建整张图、把用户改的覆盖掉
-const DRAWIO_URLS = [
+//
+// 【v0.7.3】列表是动态的：运行时由主进程注入首位 = 本地静态 draw.io 服务（drawio-static-server.cjs），
+// 断网/受限网络下仍可加载画布；后面跟随 3 个外网备用地址作为最终 fallback。
+// 默认占位使用外网地址，本地地址会在 useEffect 启动时替换首位
+const DEFAULT_DRAWIO_URLS = [
   'https://embed.diagrams.net/?embed=1&ui=kennedy&spin=1&proto=json&noExitBtn=1&noSaveBtn=1&stealth=1&noSave=0&noCloud=1&nofonts=1&notifications=0&autosave=1',
   'https://app.diagrams.net/?embed=1&ui=kennedy&spin=1&proto=json&noExitBtn=1&noSaveBtn=1&stealth=1&noCloud=1&notifications=0&autosave=1',
   'https://www.draw.io/?embed=1&ui=kennedy&spin=1&proto=json&noExitBtn=1&noSaveBtn=1&stealth=1&noCloud=1&notifications=0&autosave=1',
@@ -216,7 +220,31 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   const [isLoaded, setIsLoaded] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [urlIndex, setUrlIndex] = useState(0)
+  // drawio URL 列表：首位 = 本地静态服务（主进程注入），后面跟随外网 fallback
+  const [drawioUrls, setDrawioUrls] = useState<string[]>(DEFAULT_DRAWIO_URLS)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // 组件挂载时异步获取本地 drawio URL，把它放到列表首位
+  // Electron 环境才有此能力（通过 preload 暴露的 getDrawioUrl）；
+  // 浏览器环境直接用外网 fallback。
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (!api?.getDrawioUrl) return
+    let cancelled = false
+    api.getDrawioUrl().then((res: any) => {
+      if (cancelled || !res?.success) return
+      const localUrl = res.localUrl
+      const remoteFallbackUrls = (res.remoteFallbackUrls || []) as string[]
+      if (!localUrl) return
+      // 首位插本地 URL，后面追加外网 fallback（去重）
+      const all = [localUrl, ...remoteFallbackUrls]
+      const deduped = Array.from(new Set(all))
+      setDrawioUrls(deduped)
+      // 重置 urlIndex 以重新触发加载（state 已经更新为新数组，drawioUrl 会变）
+      setUrlIndex(0)
+    }).catch(() => { /* 静默失败：保持外网 fallback */ })
+    return () => { cancelled = true }
+  }, [])
   const [isToolbarOpen, setIsToolbarOpen] = useState(false)
   const [isVersionPanelOpen, setIsVersionPanelOpen] = useState(false)
   const [isLayoutPanelOpen, setIsLayoutPanelOpen] = useState(false)
@@ -266,7 +294,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   const lastXmlRef = useRef<string>(EMPTY_DIAGRAM_XML)
 
   // 当前使用的 draw.io URL
-  const drawioUrl = DRAWIO_URLS[urlIndex]
+  const drawioUrl = drawioUrls[urlIndex]
 
   // 根据当前 cells 生成完整的图表 XML
   const generateDiagramXml = useCallback((): string => {
@@ -450,7 +478,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
 
   // 尝试下一个备用 URL
   const tryNextUrl = useCallback(() => {
-    if (urlIndex < DRAWIO_URLS.length - 1) {
+    if (urlIndex < drawioUrls.length - 1) {
       setUrlIndex((prev) => prev + 1)
       setLoadError(null)
     } else {
@@ -1053,7 +1081,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
             <div className="w-10 h-10 border-4 border-gray-200 border-t-primary rounded-full animate-spin" />
             <div className="text-sm text-gray-500">正在加载 draw.io 编辑器...</div>
             <div className="text-xs text-gray-400">
-              正在尝试第 {urlIndex + 1}/{DRAWIO_URLS.length} 个地址
+              正在尝试第 {urlIndex + 1}/{drawioUrls.length} 个地址
             </div>
           </div>
         </div>
@@ -1071,7 +1099,7 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
             <div className="text-base font-medium text-gray-800">draw.io 编辑器加载失败</div>
             <div className="text-sm text-gray-500">{loadError}</div>
             <div className="text-xs text-gray-400">
-              已尝试 {DRAWIO_URLS.length} 个备用地址
+              已尝试 {drawioUrls.length} 个备用地址
             </div>
             <button
               onClick={handleRetry}

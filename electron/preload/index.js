@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getVersion: () => ipcRenderer.invoke('app:get-version'),
+  getDrawioUrl: () => ipcRenderer.invoke('app:get-drawio-url'),
   openFile: () => ipcRenderer.invoke('dialog:open-file'),
   openCanvasWindow: () => ipcRenderer.invoke('canvas:open-window'),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),

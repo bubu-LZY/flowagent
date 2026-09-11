@@ -1,3 +1,20 @@
+## v0.7.3 - 2026-09-11
+
+### ✨ 自托管 draw.io（断网也能加载画布）
+- **新增本地 draw.io 静态资源服务**（electron/main/drawio-static-server.cjs）：启动后监听 `127.0.0.1:38780`，把 `electron/resources/drawio/`（dev）或 `process.resourcesPath/drawio/`（prod extraResources）作为静态目录对外提供。资源直接来自 [drawio v31.1.8](https://github.com/jgraph/drawio) 的 `src/main/webapp`，已精简到 70MB（删除 shapes/stencils/templates/connect 等非必需的库）
+- **drawio 资源打包**（package.json）：通过 electron-builder `extraResources` 把 drawio 资源目录打进安装包，安装后位于 `resources/drawio/`，运行时由主进程读取
+- **DrawIoCanvas 改造**：运行时异步通过 IPC `getDrawioUrl` 获取本地 URL，把列表首位替换为本地服务，外网 embed/app.drawio 跟随其后作为最终 fallback（断网 → 走本地；本地也挂 → 走外网）
+- **vite.config.ts 修复**：原 plugin 只复制 .js 文件改名 .cjs，导致新加的 .cjs 服务模块被忽略。现在 .cjs 文件原样复制
+- **preload 暴露 `getDrawioUrl`**：渲染进程通过 `window.electronAPI.getDrawioUrl()` 异步获取本地 drawio URL 列表
+
+### 🐛 Bug 修复（AI 流式响应卡死）
+- **「AI 喊出工具名但参数 JSON 流中途断流」致命 bug**（实测多轮卡死的根因）：之前 `args` 为空白字符串（仅传了 `name: 'draw_flowchart'` 但参数 JSON 流被截断）的"伪工具调用"会被当作有效工具调用进入解析循环并静默失败，触发"AI 反复思考但不动手"的死循环。现在过滤门槛改为 `(tc.args || '').trim().length >= 2`，丢弃所有半截调用并 warn 日志
+- **空响应重试覆盖半截调用场景**：在原有的「完全空/内容过短」基础上新增「首轮半截调用」分支，触发自动重试一次（追加系统提示让 AI 重发完整工具调用）
+- **缩短 STREAM_TIMEOUT_MS**：60秒→30秒。实测卡死多在 25~45 秒发生，60 秒检测太迟；30 秒既能容纳长推理间歇，又能更早触发重连
+
+### 📝 提示词修正
+- 执行代理新增【v0.7.3·流式响应纪律】段落：思考块控制在 200 字以内、禁止废话式开头、画图参数务必一次写完整、参数过长时分批要有具体批次计划。配套系统自动检测半截调用强制重试
+
 ## v0.7.2 - 2026-09-11
 
 ### 🐛 Bug 修复（MCP 后台任务"已受理但从未启动"根因修复）

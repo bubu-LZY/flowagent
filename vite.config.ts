@@ -20,15 +20,16 @@ function electronCopyPlugin() {
       fs.mkdirSync(destPreload, { recursive: true })
       fs.mkdirSync(destAssets, { recursive: true })
       
-      // 复制主进程文件（main 目录下所有 .js 文件）
-      // 统一改名为 .cjs，因为 package.json 有 "type": "module"
+      // 复制主进程文件（main 目录下所有 .js 和 .cjs 文件）
+      // 统一改名为 .cjs（如果是 .js 改名为 .cjs，.cjs 原样复制），因为 package.json 有 "type": "module"
       // .js 会被当成 ESM，主进程需要 CommonJS
       const mainSrc = path.join(__dirname, 'electron/main')
-      const mainFiles = fs.readdirSync(mainSrc).filter(f => f.endsWith('.js'))
+      const mainFiles = fs.readdirSync(mainSrc).filter(f => f.endsWith('.js') || f.endsWith('.cjs'))
       for (const file of mainFiles) {
+        const targetName = file.endsWith('.js') ? file.replace('.js', '.cjs') : file
         fs.copyFileSync(
           path.join(mainSrc, file),
-          path.join(destMain, file.replace('.js', '.cjs'))
+          path.join(destMain, targetName)
         )
       }
       

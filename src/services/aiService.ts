@@ -354,9 +354,12 @@ function buildTools(agentId: string): OpenAI.Chat.ChatCompletionTool[] {
   }))
 }
 
-// 流式响应超时时间（毫秒）：60秒没有新 token 则认为卡住
+// 流式响应超时时间（毫秒）：30秒没有新 token 则认为卡住
+// 【v0.7.3】从 60 秒缩短到 30 秒：实测「AI 喊了工具名但参数 JSON 流中途断流」的卡死
+// 平均在 25~45 秒区间发生，60 秒超时检测太迟；30 秒既能容纳长延迟推理（thinking 模型
+// 也少有超过 30 秒不出 token 的间歇），又能更早触发重连，让用户感知更轻。
 // 注意：这是"两次数据的间隔"，不是总时长。只要一直有数据输出就不会超时
-const STREAM_TIMEOUT_MS = 60 * 1000
+const STREAM_TIMEOUT_MS = 30 * 1000
 // 初始连接超时时间（毫秒）：创建 API 连接的最大等待时间
 const CONNECTION_TIMEOUT_MS = 60 * 1000
 
@@ -514,11 +517,22 @@ export async function callAI(params: CallAIParams): Promise<string> {
     }
 
     // 将 toolCallsMap 转换为有序数组（按 index 排序），过滤掉无效项
+    // 【修复 v0.7.3】过滤「半截工具调用」（AI 喊了工具名但参数 JSON 流中途断流）：
+    // 之前 name 存在但 args 为空白字符串（''或仅空白）的"伪工具调用"会被当成有效
+    // 工具调用，进入解析循环并静默失败——触发"AI 反复思考但不动手"的死循环。
+    // 现在用 args.trim().length >= 2 作为有效门槛（"{}" 至少 2 字符）
     const toolCalls: any[] = Object.keys(toolCallsMap)
       .map(Number)
       .sort((a, b) => a - b)
       .map((index) => toolCallsMap[index])
-      .filter((tc) => tc && tc.name)
+      .filter((tc) => tc && tc.name && (tc.args || '').trim().length >= 2)
+    // 统计被丢弃的半截调用，仅作日志（方便排查"AI 卡住"问题）
+    const droppedToolCalls = Object.keys(toolCallsMap).filter(
+      (k) => toolCallsMap[Number(k)]?.name && (toolCallsMap[Number(k)]?.args || '').trim().length < 2
+    ).length
+    if (droppedToolCalls > 0) {
+      console.warn(`[callAI] 检测到 ${droppedToolCalls} 个半截工具调用（name 已发送但 args JSON 流中途断流），已丢弃`)
+    }
 
     // 清除超时计时器
     if (timeoutTimer) {
@@ -534,11 +548,19 @@ export async function callAI(params: CallAIParams): Promise<string> {
     // 卡住的条件：
     // 1. 完全没有 content、tool_calls、reasoning
     // 2. 或者：有 content 但很短（< 20字），没有 tool_calls，且是工具调用后的回复（depth > 0）
+    // 【v0.7.3】3. 首轮（depth=0）有半截工具调用被丢弃（droppedToolCalls > 0），但有效 tool_calls = 0
+    //    —— 这是「AI 喊出工具名但参数 JSON 流中途断流」的典型卡死症状，必须重试
     const isReallyEmpty = !fullContent && toolCalls.length === 0 && !fullReasoning
     const isShortNoToolResponse = fullContent && fullContent.length < 20 && toolCalls.length === 0 && depth > 0
-    const isEmptyResponse = isReallyEmpty || isShortNoToolResponse
+    const isHalfToolCall = droppedToolCalls > 0 && toolCalls.length === 0
+    const isEmptyResponse = isReallyEmpty || isShortNoToolResponse || isHalfToolCall
     if (isEmptyResponse) {
-      console.warn(`AI 响应异常（${isReallyEmpty ? '完全空' : '内容过短且无工具调用'}），可能是卡住了。内容长度=${fullContent?.length || 0}，工具调用数=${toolCalls.length}，深度=${depth}`)
+      const reason = isReallyEmpty
+        ? '完全空'
+        : isHalfToolCall
+          ? `${droppedToolCalls} 个半截工具调用（参数 JSON 中途断流）`
+          : '内容过短且无工具调用'
+      console.warn(`AI 响应异常（${reason}），可能是卡住了。内容长度=${fullContent?.length || 0}，有效工具调用数=${toolCalls.length}，半截调用数=${droppedToolCalls}，深度=${depth}`)
     }
 
     // 处理工具调用

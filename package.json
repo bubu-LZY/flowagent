@@ -1,6 +1,6 @@
 {
   "name": "flowchart-agent",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "多智能体协作的 draw.io 流程图工具",
   "private": true,
   "author": "卓阳大大",
@@ -46,6 +46,12 @@
       "dist",
       "dist-electron",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/resources/drawio",
+        "to": "drawio"
+      }
     ],
     "win": {
       "target": [
