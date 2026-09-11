@@ -93,6 +93,65 @@ function normalizeBaseUrl(baseUrl: string, autoSuffix: boolean): string {
   return url
 }
 
+// ===== 轻量非流式结构化判决 =====
+// 用于「停止意图判断」「布局语义分组」等需要 AI 语义、但不需要流式输出的场景。
+// 与 callAI 复用同一套模型配置（getOpenAIClient），stream:false 一次返回 JSON。
+// 失败返回 null 而不是抛异常，便于调用方走确定性兜底，避免打断主流程。
+export async function callAIJson<T = unknown>(opts: {
+  agentId: string
+  systemPrompt: string
+  userPrompt: string
+  timeoutMs?: number
+}): Promise<T | null> {
+  const { agentId, systemPrompt, userPrompt, timeoutMs = 15000 } = opts
+
+  const client = getOpenAIClient(agentId)
+  const modelConfig = useModelStore.getState().getAgentModel(agentId)
+  if (!client || !modelConfig?.model) {
+    console.warn('[callAIJson] 未配置模型，返回 null')
+    return null
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const resp = await client.chat.completions.create(
+      {
+        model: modelConfig.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ] as OpenAI.Chat.ChatCompletionMessageParam[],
+        stream: false,
+      },
+      { signal: controller.signal }
+    )
+
+    const raw = (resp.choices?.[0]?.message?.content ?? '').trim()
+    if (!raw) {
+      console.warn('[callAIJson] 空返回')
+      return null
+    }
+
+    // 容错：剥离 ```json 围栏，截取第一个 { 到最后一个 } 之间的内容
+    const withoutFence = raw.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim()
+    const start = withoutFence.indexOf('{')
+    const end = withoutFence.lastIndexOf('}')
+    if (start === -1 || end === -1 || end <= start) {
+      console.warn('[callAIJson] 返回内容不含 JSON 对象:', raw.slice(0, 200))
+      return null
+    }
+
+    return JSON.parse(withoutFence.slice(start, end + 1)) as T
+  } catch (e) {
+    console.warn('[callAIJson] 调用失败，返回 null:', e)
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // 获取 OpenAI 客户端
 function getOpenAIClient(agentId: string): OpenAI | null {
   const modelConfig = useModelStore.getState().getAgentModel(agentId)

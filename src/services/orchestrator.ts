@@ -3,9 +3,22 @@ import { useAgentStore, useModelStore, useChatStore, useVersionStore, useExperie
 import { useSummaryStore } from '@/store/summaryStore'
 import { useSessionStore } from '@/store/sessionStore'
 import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay, parseMentions } from '@/utils/helpers'
-import { callAI } from './aiService'
+import { callAI, callAIJson } from './aiService'
 import { addLog } from './logService'
 import { validateDiagramQuality, formatQualityReportForAI } from './diagramQuality'
+
+// 画布「写入类」工具：调用过这些才算执行代理真正动了画布（读画布/计算器等非写入工具不算）。
+// 统一常量供多处判定共用，避免新增画布工具时漏改导致「执行代理是否真干活」判定失真或静默终止。
+const CANVAS_WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'draw_flowchart',
+  'add_nodes',
+  'add_edges',
+  'update_nodes',
+  'remove_cells',
+  'load_diagram_xml',
+  'clear_diagram',
+  'auto_layout_diagram',
+])
 
 // ============ 系统消息去重（防"任务完成"刷屏） ============
 // 一次会话内，系统提示如果和最近 8 条 fingerprint 重复，就不重复插；
@@ -33,13 +46,64 @@ function findExistingTaskCompletion(): string | null {
   return null
 }
 
+/**
+ * 解析设计助手输出的设计稿（NODES / EDGES 两段），返回真实解析出的节点数与连线数。
+ * 相比以前正则匹配「是否写了 NODES/EDGES 字样」，这里真正解析内容：
+ * 只有确实存在「id | label」形式的节点行、且存在「from -> to」形式的连线行，才算有效。
+ */
+function parseDesignBlueprint(content: string): { nodeCount: number; edgeCount: number } {
+  if (!content) return { nodeCount: 0, edgeCount: 0 }
+  const text = content.replace(/<\s*think[\s\S]*?\/think>/gi, '')
+  const lines = text.split(/\r?\n/)
+
+  let inNodes = false
+  let inEdges = false
+  let nodeCount = 0
+  let edgeCount = 0
+
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) continue
+
+    // 段落标题识别（容忍常见 markdown 前缀）
+    const bare = line.replace(/[#*`>:\-｜|]/g, '').trim().toUpperCase()
+    if (bare === 'NODES' || bare === 'NODE') {
+      inNodes = true
+      inEdges = false
+      continue
+    }
+    if (bare === 'EDGES' || bare === 'EDGE') {
+      inNodes = false
+      inEdges = true
+      continue
+    }
+    // 遇到其他段落标题，退出当前段落
+    if (/^(DISPATCH|VERDICT|SCORE|QUALITY|DELIVERY|SUMMARY|EXPLAIN)\b/i.test(line)) {
+      inNodes = false
+      inEdges = false
+      continue
+    }
+
+    if (inNodes) {
+      // 节点行：id | label [| shape | color]，至少含一个竖线，且首字段不是表头 "id"
+      const parts = line.split('|').map((s) => s.trim()).filter(Boolean)
+      if (parts.length >= 2 && parts[0].toLowerCase() !== 'id') nodeCount++
+    } else if (inEdges) {
+      // 连线行：from -> to [| label]
+      if (/->/.test(line)) {
+        const from = line.split('->')[0]?.trim()
+        if (from) edgeCount++
+      }
+    }
+  }
+
+  return { nodeCount, edgeCount }
+}
+
 // ============ 保护机制常量 ============
-// 停止关键词（中英文）
-const STOP_KEYWORDS = [
-  '停', '停止', '停下', '打住', '闭嘴', '别说了', '不要说了',
-  '够了', '好了', '结束', '暂停', '终止',
-  'cancel', 'stop', 'halt', 'quit',
-]
+// 确定性兜底：只有「极短的纯停止词」（去掉标点空白后精确相等）才零成本判停，
+// 其余交给 AI 语义判断，避免靠关键词穷举误伤正常业务描述（如"从购买到结束"）。
+const HARD_STOP_WORDS = ['停', '停止', '停下', '打住', '闭嘴', '别说了', '够了', '好了', 'stop', 'halt', 'quit']
 
 // 单个会话 AI 消息最大数量（防止无限循环）
 const MAX_AI_MESSAGES = 50
@@ -440,15 +504,42 @@ ${quality.issues.join('\n')}
     }
   }
 
-  // 检测是否为停止命令
-  private isStopCommand(text: string): boolean {
-    const trimmed = text.trim().toLowerCase()
-    // 短消息（< 20字）且包含停止关键词，视为停止命令
-    if (trimmed.length < 20) {
-      return STOP_KEYWORDS.some(keyword => trimmed.includes(keyword.toLowerCase()))
+  // 检测是否为停止命令：确定性兜底 + AI 语义判断
+  // 修复：'生成一个电商从购买到结束的一个流程图' 曾被靠关键词误判为停止，导致流程不启动
+  private async isStopCommand(text: string): Promise<boolean> {
+    const trimmed = text.trim()
+    const compact = trimmed.toLowerCase().replace(/[\s，。！？、,.!?~～…]/g, '')
+
+    // 1. 零成本兜底：极短纯停止词（精确相等），绝对不可能误伤正常业务描述
+    if (compact.length > 0 && compact.length <= 4 && HARD_STOP_WORDS.includes(compact)) {
+      return true
     }
-    // 或者消息完全就是纯停止指令
-    return STOP_KEYWORDS.some(keyword => trimmed === keyword.toLowerCase())
+
+    // 长消息（明显是任务描述）不可能是停止指令，跳过耗时 AI 判断，避免每条普通消息都额外等一次模型调用
+    if (trimmed.length > 40) {
+      return false
+    }
+
+    // 2. AI 语义判断：用项目经理的模型配置做一次轻量意图分类，
+    //    明确区分「业务流程中的结束/停止」与「停止指令」
+    const { agents, activeAgentIds } = useAgentStore.getState()
+    const coordinator =
+      agents.find((a) => a.isCoordinator && activeAgentIds.includes(a.id)) ||
+      agents.find((a) => a.isCoordinator)
+    if (!coordinator) {
+      return false // 没有可用模型，宁可不停（避免误伤正常任务）
+    }
+
+    const result = await callAIJson<{ stop: boolean }>({
+      agentId: coordinator.id,
+      systemPrompt:
+        '你是流程图工具的任务意图识别器。判断用户这句话是不是"停止/中断当前任务、不要再继续"的指令。' +
+        '只返回 JSON：{"stop": true} 或 {"stop": false}。' +
+        '关键：描述业务流程中的"结束/终止/停止"（如"从购买到结束的流程""流程到此结束""结束节点"）是任务内容，不是停止指令，返回 false。',
+      userPrompt: trimmed || '(空消息)',
+    })
+
+    return result?.stop === true
   }
 
   // 计算当前 AI 消息数量
@@ -458,20 +549,22 @@ ${quality.issues.join('\n')}
   // - { type: 'dispatch', agentId, reason } → 调度下一个智能体
   // - { type: 'end', reason } → 流程结束
   // - { type: 'none', reason } → 暂不调度（等用户输入）
-  private determineNextAction(
+  private async determineNextAction(
     agent: any,
     content: string,
-    toolCallCount: number,
+    allToolCalls: any[],
     activeAgents: any[]
-  ): { type: 'retry' | 'dispatch' | 'end' | 'none'; reason: string; agentId?: string; reminder?: string } {
+  ): Promise<{ type: 'retry' | 'dispatch' | 'end' | 'none'; reason: string; agentId?: string; reminder?: string }> {
     const messages = useChatStore.getState().messages
+
+    const hasCanvasWrite = allToolCalls.some((t) => CANVAS_WRITE_TOOLS.has(t?.name))
 
     // 检查各角色是否已经发言过
     const hasDesignerReplied = messages.some((m) => m.agentId === 'designer')
     const hasExecutorReplied = messages.some((m) => m.agentId === 'executor')
     const hasReviewerReplied = messages.some((m) => m.agentId === 'reviewer')
     const executorDidRealWork = messages.some(
-      (m) => m.agentId === 'executor' && m.toolCalls && m.toolCalls.length > 0
+      (m) => m.agentId === 'executor' && m.toolCalls?.some((tc) => CANVAS_WRITE_TOOLS.has(tc.name))
     )
 
     // ============= 项目经理 =============
@@ -487,7 +580,41 @@ ${quality.issues.join('\n')}
         }
       }
 
-      // PM 完成后，按标准流程推下一个：设计 → 执行 → 评审
+      // PM 完成后，先让 AI 理解 PM 的真实调度意图（跳过环节/二次修改/提前收尾），
+      // 再用代码校验合法性，最后退回确定性固定顺序兜底。
+      const aiDecision = await this.aiDecideCoordinatorNext(
+        agent.id,
+        content,
+        { hasDesignerReplied, hasExecutorReplied, hasReviewerReplied, executorDidRealWork },
+        activeAgents
+      )
+
+      // 采纳 AI 决策：派活
+      if (aiDecision?.nextAgent) {
+        const target = activeAgents.find((a) => a.id === aiDecision.nextAgent && !a.isCoordinator)
+        // 合法性校验：派评审员前必须真的画过图（否则没有可评审的东西）
+        const validTarget =
+          target && (aiDecision.nextAgent !== 'reviewer' || executorDidRealWork)
+        if (validTarget) {
+          return {
+            type: 'dispatch',
+            agentId: target.id,
+            reason: `AI 调度决策：${aiDecision.reason || '项目经理意图'}`,
+          }
+        }
+      }
+
+      // 采纳 AI 决策：收尾（必须流程确实走完，防止 AI 误判提前交付）
+      if (aiDecision?.shouldEnd) {
+        const workflowComplete =
+          hasReviewerReplied ||
+          (executorDidRealWork && !activeAgents.find((a) => a.id === 'reviewer'))
+        if (workflowComplete) {
+          return { type: 'end', reason: `AI 判断收尾：${aiDecision.reason || '项目经理表示可交付'}` }
+        }
+      }
+
+      // 确定性兜底：标准流程推下一个：设计 → 执行 → 评审
       // 如果设计助手还没发言 → 调度设计助手
       const designer = activeAgents.find((a) => a.id === 'designer')
       const executor = activeAgents.find((a) => a.id === 'executor')
@@ -508,10 +635,9 @@ ${quality.issues.join('\n')}
 
     // ============= 设计助手 =============
     if (agent.id === 'designer') {
-      // 检查是否输出了规范格式的设计稿
-      const hasNodesSection = /NODES|节点清单|node.*list|节点列表/i.test(content)
-      const hasEdgesSection = /EDGES|连线清单|edge.*list|连线列表/i.test(content)
-      const hasDesignContent = hasNodesSection && hasEdgesSection
+      // 【根治】真正解析设计稿的内容（节点行 + 连线行），而非正则匹配「是否写了 NODES/EDGES 字样」
+      const blueprint = parseDesignBlueprint(content)
+      const hasDesignContent = blueprint.nodeCount > 0 && blueprint.edgeCount > 0
 
       // 设计稿质量不合格 → 重试
       if (!hasDesignContent) {
@@ -571,8 +697,8 @@ decision1 -> process1 | 否
     if (agent.id === 'executor') {
       // 执行代理已经在上面的"光说不练"检测里处理了重试逻辑
       // 到这里说明它成功回复了（success=true）
-      // 如果调用了工具 → 调度评审员验收
-      if (toolCallCount > 0) {
+      // 如果调用了画布写入类工具 → 调度评审员验收（读画布/计算器等不改变画布的不算）
+      if (hasCanvasWrite) {
         const reviewer = activeAgents.find((a) => a.id === 'reviewer')
         if (reviewer) {
           return { type: 'dispatch', agentId: 'reviewer', reason: '画图完成，调度评审员验收' }
@@ -590,11 +716,52 @@ decision1 -> process1 | 否
 
     // ============= 评审员 =============
     if (agent.id === 'reviewer') {
-      // 检查评审结果是 PASS 还是 FAIL
-      const isPass = /VERDICT:\s*PASS|评审通过|验收通过/i.test(content)
-      const isFail = /VERDICT:\s*FAIL|评审不通过|验收失败/i.test(content)
+      // 【根治】评审结论优先来自 validate_diagram_quality 工具的结构化结果，
+      // 工具结果缺失时才用 AI 语义判断文本，彻底摆脱「VERDICT: PASS/FAIL」关键词匹配。
+      const qualityTool = allToolCalls.find((t) => t?.name === 'validate_diagram_quality')
+      const qualityResult = qualityTool?.result
 
-      if (isPass) {
+      let verdict: 'PASS' | 'FAIL' | 'UNKNOWN' = 'UNKNOWN'
+      let failType: 'design' | 'layout' | 'other' = 'layout'
+
+      if (qualityResult && qualityResult.success === true) {
+        // 结构化判定：needsFix === false 视为通过，否则失败
+        verdict = qualityResult.needsFix === false ? 'PASS' : 'FAIL'
+      } else if (qualityResult && qualityResult.success === false) {
+        // 质检工具本身失败（画布未就绪/异常），绝不能放行
+        verdict = 'FAIL'
+      }
+
+      // 工具结果缺失/不确定时的兜底：AI 语义判断评审结论
+      if (verdict === 'UNKNOWN') {
+        const semantic = await callAIJson<{ verdict: 'PASS' | 'FAIL'; failType?: 'design' | 'layout' | 'other' }>({
+          agentId: agent.id,
+          systemPrompt:
+            '你是流程图评审结论识别器。根据评审员的回复判断其结论是 PASS（通过）还是 FAIL（不通过）。' +
+            '若 FAIL，进一步判断根因：design（流程/需求/节点缺失/结构错误，需改设计）还是 layout（坐标/连线/位置问题，需改画布）。' +
+            '只返回 JSON：{"verdict":"PASS"|"FAIL","failType":"design"|"layout"|"other"}。',
+          userPrompt: (content || '(无内容)').slice(0, 4000),
+        })
+        if (semantic) {
+          verdict = semantic.verdict === 'PASS' ? 'PASS' : 'FAIL'
+          if (semantic.failType) failType = semantic.failType
+        }
+      } else if (verdict === 'FAIL') {
+        // 有结构化结果时，仍用 AI 结合质检 issues 判定失败根因归属（设计 vs 布局）
+        const issuesText = Array.isArray(qualityResult?.issues)
+          ? qualityResult.issues.map((i: any) => `[${i.severity}/${i.type}] ${i.message}`).join('\n')
+          : ''
+        const semantic = await callAIJson<{ failType: 'design' | 'layout' | 'other' }>({
+          agentId: agent.id,
+          systemPrompt:
+            '你是流程图质检归因器。根据质量检测 issues 判定失败根因：design（流程/需求/节点缺失/结构错误，需改设计）还是 layout（坐标/连线过长/穿节点/位置问题，需改画布）。' +
+            '只返回 JSON：{"failType":"design"|"layout"|"other"}。',
+          userPrompt: (issuesText || content || '(无内容)').slice(0, 4000),
+        })
+        if (semantic?.failType) failType = semantic.failType
+      }
+
+      if (verdict === 'PASS') {
         // 通过 → 回到 PM 拍板交付
         this.reviewerFailCount = 0
         const pm = activeAgents.find((a) => a.isCoordinator)
@@ -604,7 +771,7 @@ decision1 -> process1 | 否
         return { type: 'end', reason: '评审通过，流程结束' }
       }
 
-      if (isFail) {
+      if (verdict === 'FAIL') {
         this.reviewerFailCount = (this.reviewerFailCount || 0) + 1
         // 连续 3 次评审不通过，回 PM 拍板（避免设计/执行/评审无限循环）
         if (this.reviewerFailCount >= 3) {
@@ -614,28 +781,25 @@ decision1 -> process1 | 否
           }
           return { type: 'end', reason: `评审连续 ${this.reviewerFailCount} 次不通过，流程结束` }
         }
-        // 失败 → 看失败原因决定调度谁
-        // 如果是布局/坐标问题 → 调度执行代理修改
-        // 如果是设计问题 → 调度设计助手
-        const isDesignIssue = /设计|需求|流程|结构|缺少节点/i.test(content)
-        if (isDesignIssue) {
+        // 失败 → 按 AI 归因的根因决定调度谁
+        if (failType === 'design') {
           const designer = activeAgents.find((a) => a.id === 'designer')
           if (designer) {
-            return { type: 'dispatch', agentId: 'designer', reason: '评审不通过（设计问题），回到设计助手' }
+            return { type: 'dispatch', agentId: designer.id, reason: '评审不通过（设计问题），回到设计助手' }
           }
         }
-        // 默认调度执行代理修改
+        // 布局问题/其他 → 默认调度执行代理修改
         const executor = activeAgents.find((a) => a.id === 'executor')
         if (executor) {
-          return { type: 'dispatch', agentId: 'executor', reason: '评审不通过，调度执行代理修改' }
+          return { type: 'dispatch', agentId: executor.id, reason: `评审不通过（${failType === 'design' ? '设计' : '布局'}问题），调度执行代理修改` }
         }
         return { type: 'none', reason: '评审失败但无执行代理可用' }
       }
 
-      // 没明确写 PASS/FAIL → 回到 PM，让 PM 拍板
+      // 无法确定结论 → 回到 PM，让 PM 拍板
       const pm = activeAgents.find((a) => a.isCoordinator)
       if (pm) {
-        return { type: 'dispatch', agentId: pm.id, reason: '评审完成，回到 PM 汇总' }
+        return { type: 'dispatch', agentId: pm.id, reason: '评审结论不明确，回到 PM 汇总' }
       }
       return { type: 'end', reason: '评审完成，无 PM 可调度' }
     }
@@ -652,6 +816,52 @@ decision1 -> process1 | 否
 
     // 其他未知角色 → 不调度
     return { type: 'none', reason: `未知角色 ${agent.id}，不自动调度` }
+  }
+
+  // AI 语义调度决策：理解项目经理发言的真实意图，输出下一步调度建议。
+  // 返回 null 表示 AI 无法判断（缺模型/超时/异常），调用方退回确定性默认路径。
+  private async aiDecideCoordinatorNext(
+    agentId: string,
+    content: string,
+    state: {
+      hasDesignerReplied: boolean
+      hasExecutorReplied: boolean
+      hasReviewerReplied: boolean
+      executorDidRealWork: boolean
+    },
+    activeAgents: any[]
+  ): Promise<{ nextAgent?: string; shouldEnd?: boolean; reason?: string } | null> {
+    const candidates = activeAgents.filter((a) => !a.isCoordinator)
+    if (candidates.length === 0) return null
+
+    const teamDescription = candidates
+      .map((a) => `- ${a.name}（id=${a.id}）：${a.description || ''}`)
+      .join('\n')
+
+    const result = await callAIJson<{ nextAgent?: string; shouldEnd?: boolean; reason?: string }>({
+      agentId,
+      systemPrompt:
+        '你是多智能体流程图工具的任务调度决策器。项目经理刚发完言，你要根据他的发言内容和团队进度，决定下一步调度哪个智能体，或是否收尾。' +
+        '决策原则：' +
+        '1) 项目经理明确要求继续/反复某个环节时，选择对应智能体；' +
+        '2) 项目经理要求跳过设计直接画图时，nextAgent=executor；' +
+        '3) 项目经理要求再细化设计时，nextAgent=designer；' +
+        '4) 项目经理要求重新评审时，nextAgent=reviewer；' +
+        '5) 项目经理明确表示可以交付/收尾时，shouldEnd=true；' +
+        '6) 拿不准时，不要返回 nextAgent 也不要 shouldEnd，让系统走默认流程。' +
+        'nextAgent 的取值必须是下面"可调度智能体"列表里的 id，且不要选项目经理自己。' +
+        '只返回 JSON：{"nextAgent":"某id"或省略,"shouldEnd":true或省略,"reason":"简短原因"}',
+      userPrompt:
+        `【项目经理发言】\n${(content || '(无内容)').slice(0, 3000)}\n\n` +
+        `【团队进度】\n` +
+        `- 设计助手已发言：${state.hasDesignerReplied ? '是' : '否'}\n` +
+        `- 执行代理已发言：${state.hasExecutorReplied ? '是' : '否'}\n` +
+        `- 评审员已发言：${state.hasReviewerReplied ? '是' : '否'}\n` +
+        `- 执行代理已实际画图：${state.executorDidRealWork ? '是' : '否'}\n\n` +
+        `【可调度智能体】\n${teamDescription}`,
+    })
+
+    return result
   }
 
   private getAIMessageCount(messages: ChatMessage[]): number {
@@ -725,7 +935,7 @@ decision1 -> process1 | 否
     }
 
     // 修复2：检测停止命令
-    if (this.isStopCommand(userMessage.content)) {
+    if (await this.isStopCommand(userMessage.content)) {
       console.log('[orchestrator] 检测到停止命令，立即停止所有调度')
       useChatStore.getState().stopAll()
       // 添加系统提示
@@ -1264,15 +1474,16 @@ ${skillInfoText}${toolsInfo}`
       success = true
 
       // 【重要修复】执行代理"光说不练"检测 + 自动重试
-      // 如果执行代理被明确 @ 了但一个工具都没调用，说明它在闲聊而不是干活，强制重试
-      if (agent.id === 'executor' && isExplicitlyMentioned && allToolCalls.length === 0) {
+      // 执行代理被明确 @ 了但一个画布写入工具都没调用，说明它只在读画布/闲聊而不是真正画图，强制重试
+      const didWriteCanvas = allToolCalls.some((t) => CANVAS_WRITE_TOOLS.has(t?.name))
+      if (agent.id === 'executor' && isExplicitlyMentioned && !didWriteCanvas) {
         const noToolRetryCount = (this.executorNoToolRetries || 0)
         if (noToolRetryCount < 2) {
           this.executorNoToolRetries = noToolRetryCount + 1
-          console.log(`[orchestrator] 执行代理被 @ 了但没调用任何工具，自动重试（第 ${noToolRetryCount + 1} 次）`)
+          console.log(`[orchestrator] 执行代理被 @ 了但没调用画布写入工具，自动重试（第 ${noToolRetryCount + 1} 次）`)
 
           // 记录日志
-          addLog(sessionId, 'error', `执行代理未调用工具，自动重试（第 ${noToolRetryCount + 1} 次）`, {
+          addLog(sessionId, 'error', `执行代理未调用画布写入工具，自动重试（第 ${noToolRetryCount + 1} 次）`, {
             agentId: 'executor',
             agentName: '执行代理',
             agentAvatar: '🔧',
@@ -1323,16 +1534,16 @@ ${skillInfoText}${toolsInfo}`
         }
       }
 
-      // 画布校验：执行代理声称"完成/画好"但画布仍为空 → 系统警告（不直接重画，避免淹没）
+      // 画布校验：执行代理调用了画布工具，但真实画布仍为空 → 系统警告（不直接重画，避免淹没）
       if (agent.id === 'executor') {
         try {
           const win = window as any
           if (win.drawioApi?.getXml) {
             const xml = await win.drawioApi.getXml()
             const cells = parseXmlToCells(xml)
-            const count = cells ? cells.size : 0
-            const claimedDone = /(任务完成|交付|请验收|画好了|绘制完成|已经完成|已画好)/.test(fullContent.replace(/<think>[\s\S]*?<\/think>/g, ''))
-            if (claimedDone && count <= 1) {
+            const nodeCells = cells ? Array.from(cells.values()).filter((c: any) => c.type === 'vertex').length : 0
+            const touchedCanvas = allToolCalls.some((t) => CANVAS_WRITE_TOOLS.has(t?.name))
+            if (touchedCanvas && nodeCells <= 1) {
               ops.addMessage({
                 id: generateId(),
                 role: 'assistant',
@@ -1340,7 +1551,7 @@ ${skillInfoText}${toolsInfo}`
                 agentName: '系统',
                 agentAvatar: '⚠️',
                 agentColor: '#f59e0b',
-                content: `⚠️ 执行代理声称完成，但画布只有 ${count} 个节点。请检查：(1) 是否用了 draw_flowchart？(2) 工具返回的 nodeCount 数字是否 > 1？`,
+                content: `⚠️ 执行代理调用了画布工具，但当前画布只有 ${nodeCells} 个节点（仍为空）。请检查：(1) 是否用了 draw_flowchart？(2) 工具返回的 nodeCount 数字是否 > 1？`,
                 timestamp: Date.now(),
               })
             }
@@ -1404,7 +1615,7 @@ ${skillInfoText}${toolsInfo}`
         // AI 的 DISPATCH 行只是参考，最终由代码拍板，杜绝 AI 写 DISPATCH: done/none 导致流程提前中断
         // 注意：先去掉 <think> 标签，只看实际输出内容
         const cleanContent = fullContent.replace(/<think>[\s\S]*?<\/think>/g, '')
-        const nextAction = this.determineNextAction(agent, cleanContent, allToolCalls.length, activeAgents)
+        const nextAction = await this.determineNextAction(agent, cleanContent, allToolCalls, activeAgents)
 
         if (nextAction.type === 'retry') {
           // 当前智能体输出不合格，让它重写

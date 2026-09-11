@@ -28,6 +28,17 @@ export interface LayoutOptions {
   maxIterations?: number
 }
 
+// AI 语义布局提示：由 AI 分析节点/连线语义后输出，指导布局引擎做更符合业务含义的排版。
+// 算法保证「几何精度」（不重叠、不穿节点、正交路由），AI 提供「语义」（方向/回环/分组）。
+export interface SemanticLayout {
+  /** 整体布局方向：TB=纵向主流程，LR=横向泳道/角色链 */
+  direction?: 'TB' | 'LR'
+  /** 语义上的回环边 id（重试/回退/循环），走侧边距，补充/覆盖 DFS 自动识别 */
+  backEdges?: string[]
+  /** 语义分组：同一业务阶段/角色的节点尽量聚集，缩短连线、减少交叉 */
+  groups?: { name: string; nodeIds: string[] }[]
+}
+
 const DEFAULT_OPTIONS: Required<LayoutOptions> = {
   direction: 'TB',
   nodeWidth: 160,
@@ -71,9 +82,12 @@ interface LayoutEdge {
  */
 export function layoutDiagram(
   cells: Map<string, DiagramCellInfo>,
-  options: LayoutOptions = {}
+  options: LayoutOptions = {},
+  semantic?: SemanticLayout
 ): Map<string, DiagramCellInfo> {
   const opts = { ...DEFAULT_OPTIONS, ...options }
+  // AI 语义：方向优先用语义判断（否则用调用方指定的，最后默认 TB）
+  if (semantic?.direction) opts.direction = semantic.direction
 
   // 1. 构建图数据结构
   const nodes = new Map<string, LayoutNode>()
@@ -118,6 +132,11 @@ export function layoutDiagram(
   // 识别回环边并标记（分层、虚节点、坐标分配都会用到）
   const backEdgeIds = identifyBackEdges(nodes, edges)
   for (const e of edges) e.isBack = backEdgeIds.has(e.id)
+  // AI 语义补充：把语义识别的回环边（重试/回退）也标为回环，走侧边距、不横穿主流程
+  if (semantic?.backEdges?.length) {
+    const semanticBack = new Set(semantic.backEdges)
+    for (const e of edges) if (semanticBack.has(e.id)) e.isBack = true
+  }
 
   // 2. 分层（最长路径算法）
   assignLayers(nodes, edges)
@@ -140,7 +159,7 @@ export function layoutDiagram(
   }
 
   // 6. 分配坐标
-  assignCoordinates(nodes, edges, opts)
+  assignCoordinates(nodes, edges, opts, semantic?.groups)
 
   // 7. 平行边处理
   handleParallelEdges(nodes, edges, opts)
@@ -667,7 +686,12 @@ function countLayerPairCrossings(
 
 // ==================== 6. 坐标分配 ====================
 
-function assignCoordinates(nodes: Map<string, LayoutNode>, edges: LayoutEdge[], opts: Required<LayoutOptions>): void {
+function assignCoordinates(
+  nodes: Map<string, LayoutNode>,
+  edges: LayoutEdge[],
+  opts: Required<LayoutOptions>,
+  groups?: { name: string; nodeIds: string[] }[]
+): void {
   // 收集回环边涉及的节点：把它们靠右排，让回环边走右侧边距，避免横穿主流程竖列
   const backInvolved = new Set<string>()
   for (const e of edges) {
@@ -677,6 +701,14 @@ function assignCoordinates(nodes: Map<string, LayoutNode>, edges: LayoutEdge[], 
     }
   }
 
+  // AI 语义分组：nodeId → 组序号，同组节点在层内相邻排列，缩短连线、减少跨组交叉
+  const groupIndex = new Map<string, number>()
+  if (groups && groups.length) {
+    groups.forEach((g, idx) => {
+      for (const id of g.nodeIds) groupIndex.set(id, idx)
+    })
+  }
+
   const layers: LayoutNode[][] = []
   for (const node of nodes.values()) {
     if (node.isDummy) continue // 虚节点不参与真实坐标计算
@@ -684,13 +716,20 @@ function assignCoordinates(nodes: Map<string, LayoutNode>, edges: LayoutEdge[], 
     layers[node.layer].push(node)
   }
 
-  // 每层排序：回环边节点靠右，其余按 order。回环边节点聚到右侧，便于其连线走侧边距
+  // 每层排序：回环边节点靠右 → 同组节点相邻 → 其余按 order
   for (const layer of layers) {
     if (!layer) continue
     layer.sort((a, b) => {
       const aBack = backInvolved.has(a.id) ? 1 : 0
       const bBack = backInvolved.has(b.id) ? 1 : 0
       if (aBack !== bBack) return aBack - bBack
+      const ga = groupIndex.get(a.id) ?? -1
+      const gb = groupIndex.get(b.id) ?? -1
+      if (ga !== gb) {
+        if (ga === -1) return 1
+        if (gb === -1) return -1
+        return ga - gb
+      }
       return a.order - b.order
     })
   }

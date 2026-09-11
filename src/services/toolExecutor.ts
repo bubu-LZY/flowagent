@@ -2,10 +2,10 @@ import { useMcpStore, useExperienceStore, useToolStore, useChatStore, useModelSt
 import { parseXmlToCells, salvageFromBrokenXml, DiagramCellInfo } from '@/utils/helpers'
 import { builtinTools } from '@/config/tools'
 import type { ChatMessage } from '@/types'
-import { callAI } from './aiService'
+import { callAI, callAIJson } from './aiService'
 import { delay } from '@/utils/helpers'
 import { validateDiagramQuality, formatQualityReportForAI, QualityReport } from './diagramQuality'
-import { layoutDiagram, fixNodeOverlap } from './diagramLayout'
+import { layoutDiagram, fixNodeOverlap, type SemanticLayout } from './diagramLayout'
 import { getLayoutTemplates } from './layoutTemplates'
 import { enableLibavoidForCells, setEdgeRoutingMode, spreadParallelEdges, EdgeRoutingMode } from './diagramRouting'
 
@@ -516,7 +516,7 @@ async function executeBuiltinTool(
     case 'clear_diagram':
       return executeClearDiagram(args)
     case 'auto_layout_diagram':
-      return executeAutoLayoutDiagram(args)
+      return executeAutoLayoutDiagram(args, agentId)
     case 'validate_diagram_quality':
       return executeValidateDiagramQuality()
     case 'get_layout_templates':
@@ -1868,7 +1868,7 @@ async function executeGetLayoutTemplates() {
 
 // ===== 自动布局工具 =====
 
-async function executeAutoLayoutDiagram(args: Record<string, any>) {
+async function executeAutoLayoutDiagram(args: Record<string, any>, agentId?: string) {
   const win = window as any
   if (!win.drawioApi?.isLoaded) {
     return { success: false, message: 'draw.io 画布未就绪', error: 'canvas_not_ready' }
@@ -1882,11 +1882,52 @@ async function executeAutoLayoutDiagram(args: Record<string, any>) {
       return { success: false, message: '画布为空，无需布局', error: 'empty_canvas' }
     }
 
-    const direction = (args.direction || 'TB') as 'TB' | 'LR'
+    // 2. AI 语义分析：从节点/连线业务含义出发，判断布局方向、回环边、语义分组。
+    //    失败/缺模型时降级为纯算法布局（不阻塞自动布局功能）。
+    let semantic: SemanticLayout | undefined
+    try {
+      const nodeList = Array.from(cells.values())
+        .filter((c) => c.type === 'vertex')
+        .map((c) => ({ id: c.id, label: String(c.value ?? '') }))
+      const edgeList = Array.from(cells.values())
+        .filter((c) => c.type === 'edge')
+        .map((c) => ({ id: c.id, source: c.sourceId, target: c.targetId, label: String(c.value ?? '') }))
+
+      if (nodeList.length > 0) {
+        const resolvedAgentId = agentId || 'executor'
+        const semanticResult = await callAIJson<{
+          direction?: 'TB' | 'LR'
+          backEdges?: string[]
+          groups?: { name: string; nodeIds: string[] }[]
+        }>({
+          agentId: resolvedAgentId,
+          systemPrompt:
+            '你是流程图布局语义分析器。根据节点标签和连线关系，输出对自动布局的语义提示。' +
+            'direction：判断整体走向——线性主流程/审批流/单链用 "TB"（纵向），多角色泳道/时间轴/多系统横向协作用 "LR"（横向）。' +
+            'backEdges：语义上的回环边 id（重试、循环、驳回回上一步、审核不通过返回等），这些边应走侧边距不横穿主流程。' +
+            'groups：把同一业务阶段/同一角色的节点归为一组，便于布局时相邻排列、缩短连线。' +
+            '只返回 JSON：{"direction":"TB"|"LR","backEdges":["edgeId",...],"groups":[{"name":"阶段名","nodeIds":["id",...]}]}' +
+            '若无法判断，相应字段可省略。',
+          userPrompt: JSON.stringify({ nodes: nodeList, edges: edgeList }),
+        })
+        if (semanticResult) {
+          semantic = {
+            direction: semanticResult.direction,
+            backEdges: Array.isArray(semanticResult.backEdges) ? semanticResult.backEdges : undefined,
+            groups: Array.isArray(semanticResult.groups) ? semanticResult.groups : undefined,
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[auto_layout] AI 语义分析失败，降级为纯算法布局:', e)
+    }
+
+    // 方向优先级：调用方显式指定 > AI 语义判断 > 默认 TB
+    const direction = (args.direction || semantic?.direction || 'TB') as 'TB' | 'LR'
     const enableLibavoid = args.enableLibavoid !== false // 默认开启
 
-    // 2. 执行分层布局
-    let layouted = layoutDiagram(cells, { direction })
+    // 3. 执行分层布局（传入 AI 语义提示：方向/回环边/分组）
+    let layouted = layoutDiagram(cells, { direction }, semantic)
 
     // 3. 启用 libavoid 路由（如果需要）
     if (enableLibavoid) {

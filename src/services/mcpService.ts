@@ -472,7 +472,7 @@ async function handleGetSystemInfo() {
     success: true,
     info: {
       appName: 'Flowchart Agent',
-      version: '0.5.5',
+      version: '0.6.0',
       sessionCount: sessions.length,
       currentSessionId,
       currentSessionMessageCount: messages.length,
