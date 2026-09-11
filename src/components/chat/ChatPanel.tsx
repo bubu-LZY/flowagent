@@ -145,11 +145,20 @@ export const ChatPanel: React.FC = () => {
       addMessage(newMsg)
       setInputValue('')
     }
+    // 画布元素引用注入：画布侧"添加到 AI 对话"把元素引用文本放进输入框（用户可补充诉求后发送）
+    const handleInsertInput = (e: Event) => {
+      const text = (e as CustomEvent).detail?.text
+      if (typeof text === 'string' && text.trim()) {
+        setInputValue((prev) => (prev ? `${prev}\n${text}` : text))
+      }
+    }
     window.addEventListener('flowagent:retry-ai', handleRetry)
     window.addEventListener('flowagent:redo-canvas', handleRedoCanvas)
+    window.addEventListener('flowagent:insert-input', handleInsertInput)
     return () => {
       window.removeEventListener('flowagent:retry-ai', handleRetry)
       window.removeEventListener('flowagent:redo-canvas', handleRedoCanvas)
+      window.removeEventListener('flowagent:insert-input', handleInsertInput)
     }
   }, [messages, addMessage])
 

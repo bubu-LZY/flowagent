@@ -547,6 +547,30 @@ export const useSkillStore = create<SkillState>()(
     }),
     {
       name: 'flow-agent-skills',
+      // 【修复】内置 Skill 必须始终使用代码里的最新定义：
+      // 旧版 localStorage 里的 skills 数组会整体覆盖初始值，导致代码中
+      // 新增/修订的内置 Skill 规范不生效（用户切换绘图 Skill 感觉没效果的原因之一）。
+      // 合并策略：内置 Skill 取最新定义（仅保留用户自定义的 enabled 状态）；用户自建 Skill 完全保留。
+      merge: (persistedState: any, currentState) => {
+        const persistedSkills: SkillDefinition[] = Array.isArray(persistedState?.skills)
+          ? persistedState.skills
+          : []
+        const builtinIds = new Set(builtinSkills.map((s) => s.id))
+        const userSkills = persistedSkills.filter((s) => !builtinIds.has(s.id))
+        const savedEnabled = new Map(
+          persistedSkills
+            .filter((s) => builtinIds.has(s.id))
+            .map((s) => [s.id, s.enabled as boolean])
+        )
+        const skills = [
+          ...builtinSkills.map((s) => ({
+            ...s,
+            enabled: savedEnabled.has(s.id) ? (savedEnabled.get(s.id) as boolean) : s.enabled,
+          })),
+          ...userSkills,
+        ]
+        return { ...currentState, ...persistedState, skills }
+      },
     }
   )
 )

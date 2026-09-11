@@ -231,7 +231,7 @@ export const builtinTools: ToolDefinition[] = [
       properties: {
         nodes: {
           type: 'array',
-          description: '节点数组。每项: {id, label, shape: ellipse|rounded|rectangle|diamond|parallelogram|cylinder|cloud, color: blue|green|yellow|red|purple|gray|orange, x?, y?, width?, height?}。x/y 不填自动纵向布局',
+          description: '节点数组。每项: {id, label, shape: ellipse|rounded|rectangle|diamond|parallelogram|cylinder|cloud|text|swimlane, color: blue|green|yellow|red|purple|gray|orange, x?, y?, width?, height?}。x/y 不填自动纵向布局。text=纯文本（页面标题/图注/说明文字，无填充无边框）；swimlane=泳道容器（角色/系统分组）',
           items: { type: 'object' },
         },
         edges: {
@@ -257,7 +257,7 @@ export const builtinTools: ToolDefinition[] = [
       properties: {
         nodes: {
           type: 'array',
-          description: '节点数组，每项 {id, label, shape?, color?, x?, y?, width?, height?}。id 不能与画布上已有节点重复（重复会自动改名）',
+          description: '节点数组，每项 {id, label, shape?: ellipse|rounded|rectangle|diamond|parallelogram|cylinder|cloud|text|swimlane, color?, x?, y?, width?, height?}。id 不能与画布上已有节点重复（重复会自动改名）。text=纯文本（标题/图注）；swimlane=泳道容器',
           items: { type: 'object' },
         },
       },
@@ -386,6 +386,28 @@ export const builtinTools: ToolDefinition[] = [
       type: 'object',
       properties: {},
       required: [],
+    },
+  },
+  {
+    id: 'export_diagram',
+    zhName: '导出流程图',
+    name: 'export_diagram',
+    description: 'Export the current diagram as png/svg/jpeg image (dataUrl) or xml/drawio source (xml string).',
+    zhDescription: '导出当前画布：png/svg/jpeg 返回 base64 图片（dataUrl），xml/drawio 返回源文件内容。',
+    type: 'diagram_operation',
+    source: 'builtin',
+    enabled: true,
+    parameters: {
+      type: 'object',
+      properties: {
+        format: {
+          type: 'string',
+          description: '导出格式',
+          enum: ['png', 'svg', 'jpeg', 'xml', 'drawio'],
+          default: 'png',
+        },
+      },
+      required: ['format'],
     },
   },
   {
@@ -523,6 +545,10 @@ export const builtinSkills: SkillDefinition[] = [
     triggers: ['画流程图', '画架构图', '画时序图', '画 ER 图', '画 UML', 'C4 模型', '架构', '流程', '时序', 'ER', 'UML', 'drawio', 'flowchart', 'architecture', 'sequence', 'class diagram', 'microservices'],
     systemPrompt: `You follow the "drawio-architecture" spec.
 
+MANDATORY VISIBLE BEHAVIOR (本 Skill 激活时必须执行，让用户看到规范生效)：
+- 回复必须按六步法展示：1)任务模式 2)节点清单(编号列表) 3)一次画完 4)自检结果 5)修正说明(如有) 6)报告(节点数/连线数/评分)
+- 交付时明确说明：「本图按 🎨 draw.io 架构绘图规范（六步法+强约束）绘制」
+
 WORKFLOW: 1) read task mode 2) list nodes + edges 3) draw_flowchart once 4) verify via get_diagram_xml 5) fix via update_nodes 6) report counts.
 SHAPES: start/end=ellipse, process=rounded, decision=diamond, data=cylinder. EDGES: orthogonalEdgeStyle, rounded=1, labels mid-edge.
 COLORS: main=blue, decision=yellow, ai=green, manual=orange, ticket=purple, end=red.
@@ -546,6 +572,11 @@ Always reply in Simplified Chinese.`,
     triggers: ['AIGuide', 'floracat', '导图导出', '多张配图', '文章配图', 'drawio expert', '配图导出', '导出PNG', '导出SVG', '导出PDF'],
     systemPrompt: `You follow the "AIGuide drawio-chart" spec.
 
+MANDATORY VISIBLE BEHAVIOR (本 Skill 激活时必须执行，让用户看到规范生效)：
+- 画图前必须先输出「任务模式识别」：单图 / 图+导出 / 多图 / 修改现有图，以及图类型（流程图/架构图/时序图/ER/状态图/概念图）
+- 画完图后必须主动报告：「✅ .drawio 源文件已在画布生成。如需导出 PNG/SVG 图片，请告诉我导出格式」
+- 多节点复杂主题时主动建议拆分为多张配图
+
 TASK MODES: single chart / chart+export / multi-chart from an article / modify existing.
 WORKFLOW: 1) identify mode 2) minimal inputs (topic, type, nodes, edges, export?) 3) plan structure BEFORE generating 4) order: title -> containers -> nodes -> edges -> labels 5) draw_flowchart once 6) verify + report counts.
 CHART TYPE: steps/decisions=flowchart; services=architecture; interactions=sequence; entities=ER; lifecycle=state; concepts=mindmap.
@@ -567,6 +598,12 @@ Always reply in Simplified Chinese.`,
     icon: '🐙',
     triggers: ['github 标准', 'github style', '标准规范', '最佳实践', '工业级', '专业绘图', '高质量图', 'best practices', 'standard', 'professional diagram'],
     systemPrompt: `You follow the "GitHub Standard" draw.io diagram spec from awesome-copilot.
+
+MANDATORY VISIBLE BEHAVIOR (本 Skill 激活时必须执行，违反即不合格)：
+- 页面标题：每次新建图必须在画布最上方添加标题文本节点（id 固定用 "page_title"，shape 用 "text"（纯文本无填充），文本=图表主题名，独立于流程、不与任何节点连线、位于所有节点上方居中，y 比最上方节点小 ≥100px）——这是本 Skill 的标志性要求，必须执行
+- 网格对齐：所有节点坐标 x/y 必须取 10 的整数倍（draw_flowchart 传参时就对齐，不要画完再调）
+- 泳道分组：节点 ≥ 6 个且存在角色/系统/阶段分组时，必须添加泳道容器节点（shape 用 "swimlane"，label=角色/系统名，尺寸给足容纳内部节点），同泳道节点 x 坐标一致
+- 交付时明确说明：「本图按 🐙 GitHub 标准规范绘制：页面标题+10px 网格+泳道分组」
 
 === 核心工作流（必须遵守） ===
 1) 理解需求：确认图类型、实体、关系、流向

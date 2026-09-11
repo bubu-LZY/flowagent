@@ -1059,7 +1059,12 @@ const DrawSkillSelector: React.FC = () => {
                   type="radio"
                   name="drawSkill"
                   checked={drawSkill === opt.id}
-                  onChange={() => setDrawSkill(opt.id as any)}
+                  onChange={() => {
+                    if (drawSkill !== opt.id) {
+                      setDrawSkill(opt.id as any)
+                      toast.success(`绘图规范已切换为「${opt.title}」，AI 下次画图时生效`)
+                    }
+                  }}
                   className="mt-1 w-4 h-4 accent-primary"
                 />
                 <div className="flex-1 min-w-0">

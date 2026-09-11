@@ -5,7 +5,6 @@ import { useSessionStore } from '@/store/sessionStore'
 import { generateId, extractMentionedAgentIds, extractDispatchTags, parseXmlToCells, delay, parseMentions } from '@/utils/helpers'
 import { callAI, callAIJson } from './aiService'
 import { addLog } from './logService'
-import { validateDiagramQuality, formatQualityReportForAI, suggestNodeFixes } from './diagramQuality'
 
 // 画布「写入类」工具：调用过这些才算执行代理真正动了画布（读画布/计算器等非写入工具不算）。
 // 统一常量供多处判定共用，避免新增画布工具时漏改导致「执行代理是否真干活」判定失真或静默终止。
@@ -178,7 +177,16 @@ function appendDrawSkillBlock(systemPrompt: string, drawSkillId: string, planMod
   if (skill && skill.enabled) {
     const icon = skill.icon || ""
     const name = skill.name || "Skill"
-    result = result + "\n\n🎨 ACTIVE DRAW SPEC (mandatory, from " + icon + " " + name + "）：\n" + skill.systemPrompt + "\n"
+    // 【修复】用户切换绘图 Skill 后感知不到效果：
+    // 之前只是静默拼接规范文本，且被下方通用 DRAW RULES（与默认 Skill 规定相同）稀释。
+    // 现在明确声明：Skill 的 MANDATORY VISIBLE BEHAVIOR（标题/网格/泳道/任务模式声明等
+    // 特色要求）优先级高于通用规则，且要求执行代理在回复中报告当前生效的规范名，
+    // 让用户能直接看到切换生效。
+    result = result + "\n\n🎨 ACTIVE DRAW SPEC (当前生效规范, from " + icon + " " + name + "）：\n" +
+      "⚠️ 用户已选择此 Skill 作为当前绘图规范。其中 MANDATORY VISIBLE BEHAVIOR 部分是强制要求，\n" +
+      "优先级高于下方通用 DRAW RULES（特色要求如页面标题、网格对齐、泳道、任务模式声明必须执行）。\n" +
+      "开始画图前，先在回复中声明：「本次按 " + icon + " " + name + " 规范绘制」。\n" +
+      skill.systemPrompt + "\n"
   }
   // 画图铁律（每次画图都生效，违反即重画）
   // 之前只在 planMode 才追加 → 用户实测里执行代理还是反复用 add_node 单点调
@@ -267,8 +275,6 @@ class MultiAgentOrchestrator {
   private designerRetryCount = 0
   // 评审员连续 FAIL 次数（每轮重置，超过上限回 PM 防死循环）
   private reviewerFailCount = 0
-  // 交付质量门禁连续拦截次数（PM 拍板交付被拦 +1，超过上限停止交付防死循环）
-  private deliveryGateFailCount = 0
   // 用户中途插话后已被重定向过的用户消息 id（同一条消息只重定向一次，防无限循环）
   private lastUserReqRedirectId: string | null = null
 
@@ -293,7 +299,6 @@ class MultiAgentOrchestrator {
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
       this.reviewerFailCount = 0
-      this.deliveryGateFailCount = 0
       this.lastUserReqRedirectId = null
       // 重置 chatStore 中的会话级状态（轮数、等待用户、停止状态）
       // 这些状态存在全局 store 里，切会话必须重置，否则新会话会继承旧会话的轮数
@@ -365,126 +370,9 @@ class MultiAgentOrchestrator {
     }
   }
 
-  // 交付前质量门禁：节点非空 + 质量分数达标 + 无严重问题，否则拒绝交付
-  private async checkDeliveryQuality(): Promise<{ pass: boolean; score: number; reason: string; issues: string[]; suggestions?: string[] }> {
-    try {
-      const win = window as any
-      if (!win.drawioApi?.getXml) {
-        return { pass: false, score: 0, reason: '画布 API 不可用，无法校验交付质量', issues: [] }
-      }
-      const xml = await win.drawioApi.getXml()
-      const nodes = (xml || '').match(/vertex="1"/g)?.length || 0
-      if (nodes <= 1) {
-        return { pass: false, score: 0, reason: `画布为空（节点数 ${nodes}），不能交付`, issues: [] }
-      }
-      const cells = parseXmlToCells(xml || '')
-      if (!cells) {
-        return { pass: false, score: 0, reason: '画布内容无法解析，不能交付', issues: [] }
-      }
-      const report = validateDiagramQuality(cells)
-      const QUALITY_THRESHOLD = 70
-      if (report.score < QUALITY_THRESHOLD || report.errorCount > 0) {
-        // 返回全部问题（不截断），每条都带具体节点/连线 id，方便精准定位
-        const allIssues = (report.issues || []).map((i: any) => `[${i.severity === 'error' ? '严重' : i.severity === 'warning' ? '警告' : '提示'}] ${i.message}`)
-        return {
-          pass: false,
-          score: report.score,
-          reason: `质量评分 ${report.score}/100 未达标（需 ≥${QUALITY_THRESHOLD} 且无严重问题），存在 ${report.errorCount} 个严重问题、${report.warningCount} 个警告、${report.infoCount} 个提示`,
-          issues: allIssues,
-          suggestions: suggestNodeFixes(report, cells),
-        }
-      }
-      return { pass: true, score: report.score, reason: `质量评分 ${report.score}/100 达标`, issues: [], suggestions: [] }
-    } catch (e: any) {
-      return { pass: false, score: 0, reason: `质量校验异常：${e.message || '未知错误'}`, issues: [] }
-    }
-  }
-
-  // 交付前质量门禁强制执行：通过返回 true；未通过则记日志、派执行代理修复并返回 false。
-  // 供两处交付路径复用（PM @用户 交付前 + 状态机 end 交付前），确保严重问题绝不放行。
-  private async enforceDeliveryGate(
-    agent: any,
-    ops: ChatOperations,
-    chainLevel: number,
-    activeAgents: any[]
-  ): Promise<boolean> {
-    const sessionId = useSessionStore.getState().currentSessionId || 'default'
-    const quality = await this.checkDeliveryQuality()
-    if (quality.pass) {
-      this.deliveryGateFailCount = 0
-      return true
-    }
-    this.deliveryGateFailCount += 1
-    addLog(sessionId, 'error', '交付被质量门禁拦截', {
-      agentId: agent.id,
-      agentName: agent.name,
-      agentAvatar: agent.avatar,
-      agentColor: agent.color,
-      content: `${quality.reason}${quality.issues.length ? '\n' + quality.issues.join('\n') : ''}`,
-      metadata: { score: quality.score, pass: false, failCount: this.deliveryGateFailCount },
-    })
-    // 最多自动修复 2 轮：打回 2 次后仍不达标即停止，交由项目经理/用户拍板，防止无限循环修改
-    const MAX_AUTO_REPAIR_ROUNDS = 2
-    const executor = activeAgents.find((a) => a.id === 'executor')
-    if (executor && this.deliveryGateFailCount <= MAX_AUTO_REPAIR_ROUNDS) {
-      const reminderMsg: ChatMessage = {
-        id: generateId(),
-        role: 'assistant',
-        agentId: 'system',
-        agentName: '系统',
-        agentAvatar: '🛡️',
-        agentColor: '#f59e0b',
-        content: `⛔ 第 ${this.deliveryGateFailCount} 次打回（最多自动修复 ${MAX_AUTO_REPAIR_ROUNDS} 轮）
-项目经理提交的产物未通过质检：${quality.reason}
-
-【未通过的问题清单】
-${quality.issues.join('\n')}
-${quality.suggestions?.length ? `
-【坐标级修复建议（几何计算结果，可直接作为 update_nodes 参数）】
-${quality.suggestions.join('\n')}
-建议坐标是计算出的落点，应用后必须调 validate_diagram_quality 复检；若评分下降，把该节点移回原坐标并换方向微调。
-` : ''}
-【历史快照】
-每次打回前的产物都已自动保存到「版本历史」，可在画布右侧「版本历史」面板预览、对比、恢复。
-
-【精准修复要求 · 禁止整图重画】
-- 不要调用 clear_diagram / draw_flowchart 重新生成整张图
-- 保持当前画布不变，只针对上面列出的具体问题逐个修复
-- 定位到具体节点/连线后，用 update_nodes 移动相关节点坐标（优先参考上面的坐标级建议），消除重叠、交叉、穿节点
-- 如果是斜线/路由问题，用 set_edge_routing 切换为正交路由
-- 每次 update_nodes 后调 validate_diagram_quality 复检：评分提高则保留；评分下降立即回退该次修改换方向再试
-- 修复完成后复检，直到评分 ≥70 且无严重问题`,
-        timestamp: Date.now(),
-      }
-      ops.addMessage(reminderMsg)
-      this.repliedAgentsInRound.delete(executor.id)
-      const { messages: latestMessages } = useChatStore.getState()
-      await delay(400)
-      await this.generateAgentResponse(executor, latestMessages, ops, false, true, chainLevel + 1, activeAgents)
-    } else {
-      addLog(sessionId, 'error', '质量门禁：自动修复已达上限，已停止交付', {
-        agentId: agent.id,
-        agentName: agent.name,
-        agentAvatar: agent.avatar,
-        agentColor: agent.color,
-        content: quality.reason,
-        metadata: { failCount: this.deliveryGateFailCount },
-      })
-      this.addSystemNoteUnique(
-        ops,
-        `🛑 已停止自动修复：已打回 ${this.deliveryGateFailCount} 次，超过上限（最多自动修复 ${MAX_AUTO_REPAIR_ROUNDS} 轮），本次未交付。
-
-未通过原因：${quality.reason}
-
-您可以：
-1. 在画布右侧「版本历史」选择一个历史快照预览/恢复，避免丢失中途的可用版本；
-2. 手动 @执行代理 并给出更明确、具体的修复指令；
-3. 或重新发起任务。`,
-        { avatar: '⚠️', color: '#ef4444', taskCompletion: true }
-      )
-    }
-    return false
-  }
+  // 【按用户要求】交付前质量门禁/质检检测环节整体移除（checkDeliveryQuality、
+  // enforceDeliveryGate 已删除）。质量把关由评审员 AI 语义评审 + 用户自行判断承担；
+  // validate_diagram_quality 工具仍可供智能体主动调用。
 
   /**
    * 任务完成时自动生成画图总结（非阻塞）
@@ -983,7 +871,6 @@ decision1 -> process1 | 否
       this.executorNoToolRetries = 0
       this.designerRetryCount = 0
       this.reviewerFailCount = 0
-      this.deliveryGateFailCount = 0
     } else {
       // 轮数只用来限制"讨论"，不该用来卡死"执行"：
       // 用户在等待后回复（通常是追加指令/催进度），如果任务还没完成（画布为空），
@@ -1534,8 +1421,8 @@ ${skillInfoText}${toolsInfo}`
             role: 'assistant',
             agentId: 'system',
             agentName: '系统',
-            agentAvatar: '🔧',
-            agentColor: '#ec4899',
+            agentAvatar: '⚙️',
+            agentColor: '#f59e0b',
             content: `【系统强制提醒 · 第 ${noToolRetryCount + 1} 次】执行代理必须立即调用画布工具完成操作！
 
 ⚠️ 绝对禁止：
@@ -1677,13 +1564,8 @@ ${skillInfoText}${toolsInfo}`
             ops.setStreaming(agent.id, false)
             return
           }
-          // 【修复】PM @用户 交付前，先强制执行质量门禁。
-          // 之前这里直接 return 等待用户，跳过了 checkDeliveryQuality，导致"有严重问题仍交付"。
-          const gatePassed = await this.enforceDeliveryGate(agent, ops, chainLevel, activeAgents)
-          if (!gatePassed) {
-            ops.setStreaming(agent.id, false)
-            return
-          }
+          // 【按用户要求】交付前不再做系统级质检检测/提示（整个环节移除）：
+          // 质量把关交给评审员 AI 语义评审 + 用户自行判断；validate_diagram_quality 工具仍可供智能体主动调用
           console.log(`[orchestrator] ${agent.name} @了用户，设置 waitingForUser=true，暂停调度`)
           useChatStore.getState().setWaitingForUser(true)
           this.addSystemNoteUnique(
@@ -1785,13 +1667,7 @@ ${skillInfoText}${toolsInfo}`
 
         // nextAction.type === 'end' 或 'none' → 流程结束或暂不调度
         if (nextAction.type === 'end' && agent.isCoordinator) {
-          // 交付前质量门禁：硬性要求（节点非空 + 分数≥70 + 无严重问题）不达标就拒绝交付
-          const gatePassed = await this.enforceDeliveryGate(agent, ops, chainLevel, activeAgents)
-          if (!gatePassed) {
-            ops.setStreaming(agent.id, false)
-            return
-          }
-
+          // 【按用户要求】移除交付前质量门禁检测环节，直接完成交付
           console.log(`[orchestrator] 流程结束：${nextAction.reason}`)
           this.conversationDelivered = true
           this.addSystemNoteUnique(

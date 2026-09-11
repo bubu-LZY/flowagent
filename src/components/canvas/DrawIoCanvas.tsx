@@ -232,6 +232,23 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
   const [previewData, setPreviewData] = useState<{ xml: string; label: string } | null>(null)
   const [qualityReportText, setQualityReportText] = useState<string | null>(null)
 
+  // ===== 元素引用拾取（画布右键/点击 → 引用到 AI 对话）=====
+  // draw.io 是跨域 iframe，宿主收不到其内部右键/点击事件，也无法注入插件。
+  // 替代实现：导出画布快照（PNG 坐标系与 XML 坐标系线性映射），
+  // 用户在快照上直接点选元素，反查命中后把结构化引用文本插入 AI 对话输入框。
+  interface RefCandidate {
+    kind: 'node' | 'edge' | 'text'
+    id: string
+    label: string
+    desc: string
+    distance: number
+  }
+  const [refPickerOpen, setRefPickerOpen] = useState(false)
+  const [refSnapshot, setRefSnapshot] = useState<string | null>(null)
+  const [refCandidates, setRefCandidates] = useState<RefCandidate[]>([])
+  const [refSelectedIdx, setRefSelectedIdx] = useState(0)
+  const [refBusy, setRefBusy] = useState(false)
+
   // 会话状态
   const { currentSessionId, getCurrentSession, saveDiagramXml, saveToDisk } = useSessionStore()
   // 版本历史状态（订阅 versions 数据以触发重渲染）
@@ -853,6 +870,166 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
     }
   }, [isLoaded, sendMessage, addVertex, addEdge, clearDiagram, getXmlInternal, loadXmlInternal, exportImageInternal, saveToSession])
 
+  // ===== 元素引用拾取：导出画布快照 → 用户在快照上点选 → 反查命中 → 插入 AI 对话输入框 =====
+  // 用户可引用的元素：节点、连线、连线上的文字标签（标签随连线一并带出）
+  const openRefPicker = useCallback(async () => {
+    const cells = cellsRef.current
+    const vertexCount = [...cells.values()].filter((c) => c.type === 'vertex').length
+    if (vertexCount === 0) {
+      toast.error('画布为空，没有可引用的元素')
+      return
+    }
+    setRefBusy(true)
+    try {
+      const png = await exportImageInternal('png')
+      setRefSnapshot(png)
+      setRefCandidates([])
+      setRefSelectedIdx(0)
+      setRefPickerOpen(true)
+    } catch (e) {
+      console.error('[DrawIoCanvas] 导出画布快照失败:', e)
+      toast.error('导出画布快照失败，请稍后重试')
+    } finally {
+      setRefBusy(false)
+    }
+  }, [exportImageInternal])
+
+  // 点到线段的最小距离（用于连线反查）
+  const distToSegment = (px: number, py: number, x1: number, y1: number, x2: number, y2: number): number => {
+    const dx = x2 - x1
+    const dy = y2 - y1
+    const lenSq = dx * dx + dy * dy
+    if (lenSq === 0) return Math.hypot(px - x1, py - y1)
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq
+    t = Math.max(0, Math.min(1, t))
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+  }
+
+  // 快照点击 → 图坐标反查候选元素（最近 3 个）
+  const handleRefPick = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+    const cells = cellsRef.current
+    const vertices = [...cells.values()].filter(
+      (c) => c.type === 'vertex' && c.x != null && c.y != null && c.width != null && c.height != null
+    ) as Array<{ id: string; value: string; style?: string; x: number; y: number; width: number; height: number }>
+    if (vertices.length === 0) return
+
+    const minX = Math.min(...vertices.map((v) => v.x))
+    const minY = Math.min(...vertices.map((v) => v.y))
+    const maxX = Math.max(...vertices.map((v) => v.x + v.width))
+    const maxY = Math.max(...vertices.map((v) => v.y + v.height))
+    const bboxW = Math.max(1, maxX - minX)
+    const bboxH = Math.max(1, maxY - minY)
+
+    // 归一化点击位置 → 估算图坐标（导出图与包围盒线性映射；边线/标签导致的整体偏移由"最近元素+候选确认"吸收）
+    const rect = e.currentTarget.getBoundingClientRect()
+    const nx = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+    const ny = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+    const gx = minX + nx * bboxW
+    const gy = minY + ny * bboxH
+
+    const candidates: RefCandidate[] = []
+    const labelOf = (id: string) => {
+      const v = vertices.find((x) => x.id === id)
+      return v ? String(v.value || v.id) : id
+    }
+    // 纯文本元素判定：style 以 text; 开头（draw.io 的独立文本元素）
+    const isTextElement = (v: { style?: string }) => /^text[;=]/.test(String(v.style || ''))
+
+    // 节点 / 文字元素：点在矩形内 = 0，否则到矩形最近边距离
+    for (const v of vertices) {
+      const inside = gx >= v.x - 8 && gx <= v.x + v.width + 8 && gy >= v.y - 8 && gy <= v.y + v.height + 8
+      let d: number
+      if (inside) {
+        d = 0
+      } else {
+        const dx = Math.max(v.x - gx, 0, gx - (v.x + v.width))
+        const dy = Math.max(v.y - gy, 0, gy - (v.y + v.height))
+        d = Math.hypot(dx, dy)
+      }
+      if (isTextElement(v)) {
+        candidates.push({
+          kind: 'text',
+          id: v.id,
+          label: String(v.value || v.id),
+          desc: `文字「${String(v.value || v.id)}」 (${Math.round(v.x)},${Math.round(v.y)})`,
+          distance: d,
+        })
+      } else {
+        candidates.push({
+          kind: 'node',
+          id: v.id,
+          label: String(v.value || v.id),
+          desc: `节点「${String(v.value || v.id)}」 (${Math.round(v.x)},${Math.round(v.y)}) ${Math.round(v.width)}×${Math.round(v.height)}`,
+          distance: d,
+        })
+      }
+    }
+
+    // 连线：正交折线近似（先横后竖 / 先竖后横两种 L 形取最小）
+    const edges = [...cells.values()].filter(
+      (c) => c.type === 'edge' && c.sourceId && c.targetId
+    ) as Array<{ id: string; value: string; sourceId: string; targetId: string }>
+    for (const ed of edges) {
+      const s = vertices.find((v) => v.id === ed.sourceId)
+      const t = vertices.find((v) => v.id === ed.targetId)
+      if (!s || !t) continue
+      const sx = s.x + s.width / 2
+      const sy = s.y + s.height / 2
+      const tx = t.x + t.width / 2
+      const ty = t.y + t.height / 2
+      const d1 = Math.min(
+        distToSegment(gx, gy, sx, sy, tx, sy),
+        distToSegment(gx, gy, tx, sy, tx, ty)
+      )
+      const d2 = Math.min(
+        distToSegment(gx, gy, sx, sy, sx, ty),
+        distToSegment(gx, gy, sx, ty, tx, ty)
+      )
+      const d = Math.min(d1, d2) - 6 // 连线比节点细，命中优先级略提：距离减 6 补偿
+      candidates.push({
+        kind: 'edge',
+        id: ed.id,
+        label: String(ed.value || ''),
+        desc: `连线「${labelOf(ed.sourceId)} → ${labelOf(ed.targetId)}」${ed.value ? ` 标签="${String(ed.value)}"` : ''}`,
+        distance: d,
+      })
+    }
+
+    candidates.sort((a, b) => a.distance - b.distance)
+    const picked = candidates.filter((c) => c.distance < 120).slice(0, 3)
+    if (picked.length === 0) {
+      toast.info('该位置附近没有元素，请点在节点或连线上')
+      return
+    }
+    setRefCandidates(picked)
+    setRefSelectedIdx(0)
+  }, [])
+
+  // 把选中的元素引用插入 AI 对话输入框（用户补充诉求后发送）
+  const insertSelectedRef = useCallback(() => {
+    const c = refCandidates[refSelectedIdx]
+    if (!c) return
+    let text: string
+    if (c.kind === 'text' || c.kind === 'node') {
+      // text/node 都是 vertex（文字元素本质是无填充的 vertex）
+      const v = [...cellsRef.current.values()].find((x) => x.id === c.id) as DiagramVertex | undefined
+      if (c.kind === 'text') {
+        const geo = v ? ` 坐标=(${Math.round(v.x || 0)},${Math.round(v.y || 0)})` : ''
+        text = `[画布元素引用] 文字 id="${c.id}" 内容="${c.label}"${geo}`
+      } else {
+        const geo = v ? ` 坐标=(${Math.round(v.x || 0)},${Math.round(v.y || 0)}) 尺寸=${Math.round(v.width || 0)}×${Math.round(v.height || 0)}` : ''
+        text = `[画布元素引用] 节点 id="${c.id}" 标签="${c.label}"${geo}`
+      }
+    } else {
+      text = `[画布元素引用] 连线 id="${c.id}" ${c.desc.replace(/^连线/, '')}`
+    }
+    window.dispatchEvent(new CustomEvent('flowagent:insert-input', { detail: { text } }))
+    toast.success('已添加到对话输入框，可补充修改要求后发送')
+    setRefPickerOpen(false)
+    setRefSnapshot(null)
+    setRefCandidates([])
+  }, [refCandidates, refSelectedIdx])
+
   // 点击工具栏外部收起
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -1302,6 +1479,88 @@ export const DrawIoCanvas: React.FC<DrawIoCanvasProps> = ({ onLoad }) => {
           title="draw.io Editor"
           onError={handleIframeError}
         />
+      )}
+
+      {/* 元素引用拾取入口：点选画布元素 → 引用到 AI 对话（节点/连线/连线标签均可） */}
+      {!isCanvasInExternalWindow && isLoaded && (
+        <button
+          onClick={openRefPicker}
+          disabled={refBusy}
+          className="absolute left-3 bottom-10 z-20 px-3 py-1.5 rounded-lg bg-white/90 backdrop-blur border border-gray-200 shadow-md text-xs font-medium text-gray-700 hover:bg-white hover:text-primary transition-all disabled:opacity-50"
+          title="点选画布上的节点、文字或连线，把该元素引用到 AI 对话，AI 可精确定位"
+        >
+          {refBusy ? '⏳ 导出快照…' : '📍 引用元素到对话'}
+        </button>
+      )}
+
+      {/* 元素引用拾取浮层：显示画布快照，用户点击元素反查命中，确认后插入对话输入框 */}
+      {refPickerOpen && refSnapshot && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={() => setRefPickerOpen(false)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl w-[78%] h-[80%] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between bg-gray-50">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm font-semibold text-gray-800">📍 引用画布元素</span>
+                <span className="text-xs text-gray-400 truncate">点击快照中的节点、文字或连线，选中后添加到 AI 对话</span>
+              </div>
+              <button
+                onClick={() => setRefPickerOpen(false)}
+                className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100 transition-colors flex-shrink-0"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto bg-gray-100 p-3 flex items-center justify-center">
+              <img
+                src={refSnapshot}
+                alt="画布快照"
+                className="max-w-full max-h-full object-contain cursor-crosshair select-none shadow-md rounded"
+                draggable={false}
+                onClick={handleRefPick}
+              />
+            </div>
+            {refCandidates.length > 0 && (
+              <div className="px-4 py-3 border-t border-gray-200 bg-gray-50 space-y-2">
+                <div className="text-xs text-gray-500">命中的元素（点击切换选中）：</div>
+                <div className="flex flex-wrap gap-2">
+                  {refCandidates.map((c, i) => (
+                    <button
+                      key={c.id}
+                      onClick={() => setRefSelectedIdx(i)}
+                      className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+                        i === refSelectedIdx
+                          ? 'bg-primary text-white border-primary'
+                          : 'bg-white text-gray-700 border-gray-200 hover:border-primary/50'
+                      }`}
+                    >
+                      {c.kind === 'node' ? '🟦 ' : c.kind === 'text' ? '🅣 ' : '↔️ '}
+                      {c.desc}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={insertSelectedRef}
+                    className="px-4 py-1.5 text-xs rounded-md bg-primary text-white hover:bg-primary-hover transition-colors"
+                  >
+                    添加到 AI 对话
+                  </button>
+                  <button
+                    onClick={() => setRefCandidates([])}
+                    className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100 transition-colors"
+                  >
+                    重新点选
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {/* 版本预览弹窗：先看再决定是否恢复，避免"想看一眼却被迫恢复" */}

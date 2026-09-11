@@ -1087,6 +1087,10 @@ async function executeDrawFlowchart(args: any) {
     parallelogram: 'shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;',
     cylinder: 'shape=cylinder;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;',
     cloud: 'shape=cloud;whiteSpace=wrap;html=1;',
+    // 纯文本：无填充无边框，用于页面标题/图注/说明文字
+    text: 'text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;',
+    // 泳道容器：标题栏在顶部，内部子节点以 parent=容器id 放入
+    swimlane: 'swimlane;html=1;whiteSpace=wrap;startSize=30;',
   }
   const COLORS: Record<string, { fill: string; stroke: string }> = {
     blue: { fill: '#dae8fc', stroke: '#6c8ebf' },
@@ -1131,13 +1135,15 @@ async function executeDrawFlowchart(args: any) {
     const stroke = String(n.strokeColor || color.stroke)
 
     // 坐标：给一个默认纵向布局，AI 没填坐标也能画出整齐的图
-    const width = Number(n.width) || (shape === 'diamond' ? 180 : 160)
-    const height = Number(n.height) || (shape === 'diamond' ? 80 : 60)
+    const width = Number(n.width) || (shape === 'diamond' ? 180 : shape === 'text' ? 320 : shape === 'swimlane' ? 400 : 160)
+    const height = Number(n.height) || (shape === 'diamond' ? 80 : shape === 'text' ? 40 : shape === 'swimlane' ? 500 : 60)
     const x = Number.isFinite(Number(n.x)) && n.x !== undefined && n.x !== '' ? Number(n.x) : Math.round(600 - width / 2)
     const y = Number.isFinite(Number(n.y)) && n.y !== undefined && n.y !== '' ? Number(n.y) : autoY
     autoY = y + height + 80
 
-    cellsXml += `\n    <mxCell id="${id}" value="${esc(label)}" style="${styleBase}fillColor=${fill};strokeColor=${stroke};" vertex="1" parent="1"><mxGeometry x="${x}" y="${y}" width="${width}" height="${height}" as="geometry" /></mxCell>`
+    // text/swimlane 不强制填充描边（纯文本无填充；泳道只有容器底色）
+    const styleExtra = shape === 'text' || shape === 'swimlane' ? '' : `fillColor=${fill};strokeColor=${stroke};`
+    cellsXml += `\n    <mxCell id="${id}" value="${esc(label)}" style="${styleBase}${styleExtra}" vertex="1" parent="1"><mxGeometry x="${x}" y="${y}" width="${width}" height="${height}" as="geometry" /></mxCell>`
   }
 
   // ===== 生成连线 =====
@@ -1225,6 +1231,10 @@ const FLOW_SHAPE_STYLES: Record<string, string> = {
   parallelogram: 'shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fixedSize=1;',
   cylinder: 'shape=cylinder;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;',
   cloud: 'shape=cloud;whiteSpace=wrap;html=1;',
+  // 纯文本：无填充无边框，用于页面标题/图注/说明文字
+  text: 'text;html=1;align=center;verticalAlign=middle;whiteSpace=wrap;',
+  // 泳道容器：标题栏在顶部
+  swimlane: 'swimlane;html=1;whiteSpace=wrap;startSize=30;',
 }
 // 语义色板
 const FLOW_COLORS: Record<string, { fill: string; stroke: string }> = {
@@ -1250,10 +1260,12 @@ function buildVertexStyle(n: any): { style: string; width: number; height: numbe
   const color = FLOW_COLORS[String(n.color || 'blue').toLowerCase()] || FLOW_COLORS.blue
   const fill = String(n.fillColor || color.fill)
   const stroke = String(n.strokeColor || color.stroke)
+  // text/swimlane 不强制填充描边（纯文本无填充；泳道只有容器底色）
+  const styleExtra = shape === 'text' || shape === 'swimlane' ? '' : `fillColor=${fill};strokeColor=${stroke};`
   return {
-    style: `${base}fillColor=${fill};strokeColor=${stroke};`,
-    width: Number(n.width) || (shape === 'diamond' ? 180 : 160),
-    height: Number(n.height) || (shape === 'diamond' ? 80 : 60),
+    style: `${base}${styleExtra}`,
+    width: Number(n.width) || (shape === 'diamond' ? 180 : shape === 'text' ? 320 : shape === 'swimlane' ? 400 : 160),
+    height: Number(n.height) || (shape === 'diamond' ? 80 : shape === 'text' ? 40 : shape === 'swimlane' ? 500 : 60),
   }
 }
 // 把 cells Map 重建为完整 mxGraphModel（DOM 取出的 value 已解码，这里重新转义）

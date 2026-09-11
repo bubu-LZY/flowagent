@@ -316,18 +316,19 @@ function detectParallelOverlap(
       const [a, b] = pairEdges
       const isSameDirection = a.sourceId === b.sourceId
       // 如果两条边的起点终点完全一样（同方向平行边），很可能会重合
+      // 【升级为 error】两条线完全叠在一起视觉上等同断线/乱线，用户明确反馈这是高频严重问题
       if (isSameDirection) {
         issues.push({
           type: 'parallelOverlap',
-          severity: 'warning',
-          message: `「${a.sourceId}→${a.targetId}」之间有 ${pairEdges.length} 条同向连线，可能重合在一起`,
+          severity: 'error',
+          message: `「${a.sourceId}→${a.targetId}」之间有 ${pairEdges.length} 条同向连线重合在一起`,
           details: { pair: key, count: pairEdges.length, edgeIds: pairEdges.map((e) => e.id) },
         })
       } else {
         // 反方向的边也可能在同一路径上，也算可能重合
         issues.push({
           type: 'parallelOverlap',
-          severity: 'info',
+          severity: 'warning',
           message: `「${a.sourceId}↔${a.targetId}」之间有双向连线，建议适当偏移避免重合`,
           details: { pair: key, count: pairEdges.length, edgeIds: pairEdges.map((e) => e.id) },
         })
